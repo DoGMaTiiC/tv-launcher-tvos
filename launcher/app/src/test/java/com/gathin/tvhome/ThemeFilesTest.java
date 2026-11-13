@@ -49,4 +49,29 @@ public class ThemeFilesTest {
         assertFalse(ThemeFiles.isCollection(Arrays.asList("wallpapers", "dusk.jpg")));
         assertFalse(ThemeFiles.isCollection(Collections.singletonList("config.json")));
     }
+
+    @Test public void heroImagesAreAllowed() {
+        assertEquals("heroes/com.netflix.ninja.jpg",
+                ThemeFiles.path(Arrays.asList("heroes", "com.netflix.ninja.jpg")));
+        assertEquals("heroes/org.jellyfin.androidtv.WEBP",
+                ThemeFiles.path(Arrays.asList("heroes", "org.jellyfin.androidtv.WEBP")));
+        assertTrue(ThemeFiles.isHero(Arrays.asList("heroes", "com.netflix.ninja.png")));
+        assertFalse(ThemeFiles.isHero(Arrays.asList("heroes", "clip.mp4")));
+        assertFalse(ThemeFiles.isHero(Collections.singletonList("heroes")));
+        assertNull(ThemeFiles.path(Arrays.asList("heroes", "clip.mp4")));
+        assertNull(ThemeFiles.path(Arrays.asList("heroes", ".jpg")));
+    }
+
+    @Test public void aerialAndWallpaperVideosAreAllowed() {
+        assertEquals("aerial/coast.mp4", ThemeFiles.path(Arrays.asList("aerial", "coast.mp4")));
+        assertEquals("aerial/Night_Loop.MP4", ThemeFiles.path(Arrays.asList("aerial", "Night_Loop.MP4")));
+        assertEquals("wallpapers/ocean.mp4", ThemeFiles.path(Arrays.asList("wallpapers", "ocean.mp4")));
+        assertTrue(ThemeFiles.isVideo("coast.mp4"));
+        assertTrue(ThemeFiles.isVideo("Night_Loop.MP4"));
+        assertFalse(ThemeFiles.isVideo(".mp4"));
+        assertFalse(ThemeFiles.isVideo("coast.jpg"));
+        assertFalse(ThemeFiles.isVideo(null));
+        assertNull(ThemeFiles.path(Arrays.asList("aerial", "still.jpg")));
+        assertNull(ThemeFiles.path(Arrays.asList("aerial", ".mp4")));
+    }
 }

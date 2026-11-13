@@ -1,7 +1,10 @@
 package com.gathin.tvhome;
 
+import android.graphics.Bitmap;
+import android.graphics.BitmapShader;
 import android.graphics.Canvas;
 import android.graphics.LinearGradient;
+import android.graphics.Matrix;
 import android.graphics.Paint;
 import android.graphics.Rect;
 import android.graphics.RectF;
@@ -18,16 +21,24 @@ public class DockDecoration extends RecyclerView.ItemDecoration {
     private final float density;
     private final Paint band = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint edge = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint backdropPaint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
+    private final Matrix backdropMatrix = new Matrix();
+    private final RectF backdropSrc = new RectF();
     private final RectF rect = new RectF();
 
     /** Extra band below the tiles for their names (always_show_names), in px. */
     private final float namesRoom;
     /** Light glass like the top bar's pills (config.xml dock_glass): a white tint that fades downwards. */
     private final boolean lightGlass;
+    /** Frosted Glass Dock (config.xml dock_blur): softened backdrop crop + 0x18FFFFFF->0x0AFFFFFF fill + 1.5dp rim. */
+    private final boolean dockBlur;
     /** Padding all round the tiles equal to the gap between them (config.xml dock_even_padding). */
     private final boolean evenPadding;
     /** The band's top and bottom the glass gradient was made for; it is remade when they move. */
     private float shaderTop = Float.NaN, shaderBottom = Float.NaN;
+    private float backdropLeft = Float.NaN, backdropTop = Float.NaN, backdropRight = Float.NaN, backdropBottom = Float.NaN;
+    private Bitmap backdropBitmap;
+    private BitmapShader backdropShader;
     /** Draw the band and its edge (config.xml dock_band); false leaves the tiles floating on the wallpaper. */
     private final boolean bandVisible;
     /** single_row: the tiles after the dock share its row, so they take the same offsets to stay level with it. */
@@ -47,18 +58,45 @@ public class DockDecoration extends RecyclerView.ItemDecoration {
      */
     DockDecoration(int dockSize, float density, boolean translucent, boolean names, int opacity, boolean lightGlass,
                    boolean evenPadding, boolean bandVisible, boolean singleRow, boolean bandAll) {
+        this(dockSize, density, translucent, names, opacity, lightGlass, evenPadding, bandVisible, singleRow, bandAll, false);
+    }
+
+    /**
+     * @param dockBlur Glass Dock mode: frosted translucent fill, optional softened backdrop crop, and 1.5dp specular rim.
+     */
+    DockDecoration(int dockSize, float density, boolean translucent, boolean names, int opacity, boolean lightGlass,
+                   boolean evenPadding, boolean bandVisible, boolean singleRow, boolean bandAll, boolean dockBlur) {
         this.dockSize = dockSize;
         this.singleRow = singleRow;
         this.bandAll = singleRow && bandAll;
         this.density = density;
         this.namesRoom = names ? 22 * density : 0;
         this.lightGlass = lightGlass;
+        this.dockBlur = dockBlur;
         this.evenPadding = evenPadding;
         this.bandVisible = bandVisible;
         band.setColor(translucent ? 0x8C121014 : (Math.round(opacity * 2.55f) << 24) | 0x141416);
         edge.setStyle(Paint.Style.STROKE);
-        edge.setStrokeWidth(density);
-        edge.setColor(lightGlass ? 0x38FFFFFF : translucent ? 0x26FFFFFF : 0x1FFFFFFF);
+        edge.setStrokeWidth(DockBlur.rimStrokeWidthPx(density, dockBlur));
+        edge.setColor(DockBlur.rimColor(dockBlur, lightGlass, translucent));
+    }
+
+    /** Sets an optional wallpaper crop behind the Glass Dock; softened once off-frame and drawn via BitmapShader. */
+    public void setBackdropCrop(Bitmap crop) {
+        Bitmap softened = DockBlur.softenBackdropCrop(crop);
+        if (this.backdropBitmap != null && this.backdropBitmap != softened) {
+            this.backdropBitmap.recycle();
+        }
+        this.backdropBitmap = softened;
+        if (softened != null) {
+            this.backdropShader = new BitmapShader(softened, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP);
+            this.backdropSrc.set(0f, 0f, softened.getWidth(), softened.getHeight());
+            this.backdropPaint.setShader(this.backdropShader);
+        } else {
+            this.backdropShader = null;
+            this.backdropPaint.setShader(null);
+        }
+        this.backdropLeft = Float.NaN;
     }
 
     /** Concentric corners: the band's radius is the tiles' radius plus the band's padding around them. */
@@ -139,9 +177,21 @@ public class DockDecoration extends RecyclerView.ItemDecoration {
             rect.right = Math.min(rect.right, parent.getWidth() - density);
         }
         rect.bottom += namesRoom;
-        if (lightGlass && (rect.top != shaderTop || rect.bottom != shaderBottom)) {
-            // The pills' glass (pill_bg: white, 18% fading to 8%), a little fainter over this much larger area.
-            band.setShader(new LinearGradient(0, rect.top, 0, rect.bottom, 0x24FFFFFF, 0x0DFFFFFF,
+        if (dockBlur && backdropShader != null) {
+            if (rect.left != backdropLeft || rect.top != backdropTop
+                    || rect.right != backdropRight || rect.bottom != backdropBottom) {
+                backdropMatrix.setRectToRect(backdropSrc, rect, Matrix.ScaleToFit.FILL);
+                backdropShader.setLocalMatrix(backdropMatrix);
+                backdropLeft = rect.left;
+                backdropTop = rect.top;
+                backdropRight = rect.right;
+                backdropBottom = rect.bottom;
+            }
+            c.drawRoundRect(rect, radius, radius, backdropPaint);
+        }
+        int[] gradientColors = DockBlur.frostedGradientColors(dockBlur, lightGlass);
+        if (gradientColors != null && (rect.top != shaderTop || rect.bottom != shaderBottom)) {
+            band.setShader(new LinearGradient(0, rect.top, 0, rect.bottom, gradientColors[0], gradientColors[1],
                     Shader.TileMode.CLAMP));
             shaderTop = rect.top;
             shaderBottom = rect.bottom;

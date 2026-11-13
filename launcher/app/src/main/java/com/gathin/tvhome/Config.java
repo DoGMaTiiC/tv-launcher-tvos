@@ -89,6 +89,11 @@ final class Config {
     final boolean animations;
     final boolean advancedEffects;
     final boolean tileTilt;
+    final boolean dockBlur;
+    final boolean heroArt;
+    final boolean controlCenter;
+    final boolean musicPill;
+    final String musicPillCorner;
     final int rowsBelowDock;
     final boolean shamsiDate;
     /** Lunisolar date under the date (config.json lunar_date), computed for lunarUtcOffset hours east of UTC (-1: by locale). */
@@ -300,7 +305,7 @@ final class Config {
                    boolean handleViewInputs, boolean tileMenu, boolean dockEvenPadding, boolean dockBand, boolean cinematicDots, boolean cinematicWhiteFocus, boolean wifiStatusColor, int cinematicScrim, int cinematicArt,
                    Map<String, Set<String>> wallpaperMoods, boolean gamepadPassthrough, boolean consumeVolumeKeys, boolean volumePausesFilter, boolean homeIgnoreChannelKeys, boolean powerOnHome, boolean homeLongPressHome, boolean wifiStatusWarnings, List<String> topBarApps, boolean showGreeting, boolean headerWhite, boolean clockWallpaper, int clockWallpaperDim, boolean clockGlow, String glassStyle, boolean singleRow, boolean dockBandAll, boolean lunarDate, int lunarUtcOffset, boolean dateBelowClock, boolean vpnPill, String locale, boolean powerOnHomeAlways, boolean inputsConnectedOnly, boolean inputsCecStateOnly,
                    int openOnStartNetworkWait, boolean openOnStartOnWake, boolean iconOnlyVpn, String clockFormat, boolean backOpensClock, boolean glowSnap,
-                   boolean settingsKeyClearTask) {
+                   boolean settingsKeyClearTask, boolean dockBlur, boolean heroArt, boolean controlCenter, boolean musicPill, String musicPillCorner) {
         this.handleViewInputs = handleViewInputs;
         this.tileMenu = tileMenu;
         this.inputKeycodes = inputKeycodes;
@@ -330,6 +335,11 @@ final class Config {
         this.animations = animations;
         this.advancedEffects = advancedEffects;
         this.tileTilt = tileTilt;
+        this.dockBlur = dockBlur;
+        this.heroArt = heroArt;
+        this.controlCenter = controlCenter;
+        this.musicPill = musicPill;
+        this.musicPillCorner = musicPillCorner;
         this.shamsiDate = shamsiDate;
         this.lunarDate = lunarDate;
         this.lunarUtcOffset = lunarUtcOffset;
@@ -466,6 +476,11 @@ final class Config {
         boolean animations = res.getBoolean(R.bool.animations);
         boolean advancedEffects = res.getBoolean(R.bool.advanced_effects);
         boolean tileTilt = res.getBoolean(R.bool.tile_tilt);
+        boolean dockBlur = res.getBoolean(R.bool.dock_blur);
+        boolean heroArt = res.getBoolean(R.bool.hero_art);
+        boolean controlCenter = res.getBoolean(R.bool.control_center);
+        boolean musicPill = res.getBoolean(R.bool.music_pill);
+        String musicPillCorner = res.getString(R.string.music_pill_corner).trim();
         boolean shamsi = res.getBoolean(R.bool.shamsi_date);
         boolean lunar = res.getBoolean(R.bool.lunar_date);
         int lunarOffset = -1;
@@ -584,6 +599,11 @@ final class Config {
             animations = bool(json, "animations", animations);
             advancedEffects = bool(json, "advanced_effects", advancedEffects);
             tileTilt = bool(json, "tile_tilt", tileTilt);
+            dockBlur = bool(json, "dock_blur", dockBlur);
+            heroArt = bool(json, "hero_art", heroArt);
+            controlCenter = bool(json, "control_center", controlCenter);
+            musicPill = bool(json, "music_pill", musicPill);
+            musicPillCorner = string(json, "music_pill_corner", musicPillCorner);
             shamsi = bool(json, "shamsi_date", shamsi);
             lunar = bool(json, "lunar_date", lunar);
             lunarOffset = integer(json, "lunar_utc_offset", lunarOffset, -1, 14);
@@ -687,6 +707,11 @@ final class Config {
         animations = choices.getBoolean("animations", animations);
         advancedEffects = choices.getBoolean("advanced_effects", advancedEffects);
         tileTilt = choices.getBoolean("tile_tilt", tileTilt);
+        dockBlur = choices.getBoolean("dock_blur", dockBlur);
+        heroArt = choices.getBoolean("hero_art", heroArt);
+        controlCenter = choices.getBoolean("control_center", controlCenter);
+        musicPill = choices.getBoolean("music_pill", musicPill);
+        musicPillCorner = choices.getString("music_pill_corner", musicPillCorner);
         File wallpaper = dir != null ? new File(dir, WALLPAPER_NAME) : null;
         if (wallpaper != null && !(wallpaper.isFile() && wallpaper.length() > 0)) wallpaper = null;
         // A theme can also switch the wallpaper off while the file is still there.
@@ -737,7 +762,7 @@ final class Config {
                 Math.max(0, Math.min(90, clockWallpaperDim)), clockGlow, glassStyle, singleRow && dockRow, dockBandAll, lunar, lunarOffset,
                 dateBelowClock, vpnPill, locale, powerOnHomeAlways, inputsConnectedOnly, inputsCecStateOnly,
                 Math.max(0, Math.min(600, openOnStartNetworkWait)), openOnStartOnWake, iconOnlyVpn, clockFormat, backOpensClock, glowSnap,
-                settingsKeyClearTask);
+                settingsKeyClearTask, dockBlur, heroArt, controlCenter, musicPill, musicPillCorner);
     }
 
     /**

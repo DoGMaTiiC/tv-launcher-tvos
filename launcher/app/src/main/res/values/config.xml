@@ -426,6 +426,11 @@
     <!-- tvOS 26 Focus Slab: 3D directional tilt (2-4 deg) with spring return, 1.05x focus scale,
          specular sheen shift, inner banner parallax, and dimmed grid labels below the dock. -->
     <bool name="tile_tilt">false</bool>
+    <bool name="dock_blur">false</bool>
+    <bool name="hero_art">false</bool>
+    <bool name="control_center">false</bool>
+    <bool name="music_pill">false</bool>
+    <string name="music_pill_corner" translatable="false">bottom_right</string>
 
     <!-- Optional Default-home tile; keep this key for existing themes and tile-ordering work.
          Off by default because the chooser is also available from launcher settings. -->

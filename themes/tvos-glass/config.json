@@ -1,0 +1,12 @@
+{
+  "animations": true,
+  "cinematic_home": true,
+  "control_center": true,
+  "dock_blur": true,
+  "dock_even_padding": true,
+  "dock_glass": true,
+  "hero_art": true,
+  "music_pill": true,
+  "music_pill_corner": "bottom_right",
+  "tile_tilt": true
+}

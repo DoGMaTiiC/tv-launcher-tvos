@@ -95,7 +95,7 @@ import java.util.Set;
 /**
  * tvOS style home: black, a pinned dock row, an app grid, and one glass highlight that springs between tiles.
  */
-public class MainActivity extends Activity implements AppAdapter.TileListener {
+public class MainActivity extends Activity implements AppAdapter.TileListener, ControlCenter.Host {
     @Override
     protected void attachBaseContext(android.content.Context base) {
         super.attachBaseContext(LauncherLocale.wrap(base));   // locale
@@ -173,6 +173,14 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
     private final Map<String, Bitmap> heroArtCache = new HashMap<>();
     /** The app whose artwork heroArt shows, so focusing it again only fades it back in. */
     private String heroArtKey;
+    private boolean heroArtEnabled;
+    private int heroArtGeneration;
+    private java.util.concurrent.ExecutorService heroArtExecutor;
+    private MusicPill musicPill;
+    private Dialog controlCenterDialog;
+    private DockDecoration dockDecoration;
+    private boolean controlCenterEnabled;
+    private boolean backLongPressed;
     /** The focus glow's colour while the cinematic shelf tints it, 0 for plain white glass. */
     private int glassAccent;
     private int ambientColor = -1;
@@ -545,7 +553,20 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         heroDotsShown = cfg.cinematicDots;
         cinematicWhiteFocus = cfg.cinematicWhiteFocus;
         heroArtAlpha = cfg.cinematicArt / 100f;
+        heroArtEnabled = cfg.heroArt;
+        if (heroArtEnabled && heroArtAlpha <= 0f) heroArtAlpha = 0.85f;
         if (cinematic) setUpCinematicShelf(cfg.cinematicScrim);
+        if (heroArtEnabled && !cinematic) {
+            heroArt.setVisibility(View.VISIBLE);
+            heroArt.forceHasOverlappingRendering(false);
+            if (cfg.cinematicScrim > 0) {
+                View scrim = findViewById(R.id.heroScrim);
+                Drawable shade = scrimDrawable();
+                shade.setAlpha(cfg.cinematicScrim * 255 / 100);
+                scrim.setBackground(shade);
+                scrim.setVisibility(View.VISIBLE);
+            }
+        }
         // dock_title false: the name above the dock (and the cinematic lines under it) never shows; the glow
         // still follows the dock.
         if (!cfg.dockTitle) hero.setVisibility(View.GONE);
@@ -615,7 +636,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
             date.setPadding(0, (int) (4 * density), 0, 0);
         }
         vpnApp = cfg.vpnApp;
-        vpnPill = cfg.vpnPill && !cfg.topMenu;
+        vpnPill = cfg.vpnPill && !cfg.topMenu && !cfg.controlCenter;
         btnVpn = findViewById(R.id.btnVpn);
         moduleCards = cfg.moduleCards;
         hiddenApps = new HashSet<>(cfg.hiddenApps);
@@ -694,8 +715,23 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
             public void onChildViewDetachedFromWindow(@NonNull View v) {
             }
         });
-        if (dockRow) grid.addItemDecoration(new DockDecoration(COLUMNS, density, cinematic, cfg.alwaysShowNames, cfg.dockOpacity, cfg.dockGlass, cfg.dockEvenPadding, cfg.dockBand,
-                singleRow, cfg.dockBandAll));
+        if (dockRow) {
+            dockDecoration = new DockDecoration(COLUMNS, density, cinematic, cfg.alwaysShowNames && !cfg.dockBlur, cfg.dockOpacity, cfg.dockGlass, cfg.dockEvenPadding, cfg.dockBand,
+                    singleRow, cfg.dockBandAll, cfg.dockBlur);
+            grid.addItemDecoration(dockDecoration);
+            if (cfg.dockBlur && cfg.wallpaper != null && cfg.wallpaper.isFile()) {
+                final File wp = cfg.wallpaper;
+                if (heroArtExecutor == null) heroArtExecutor = java.util.concurrent.Executors.newSingleThreadExecutor();
+                heroArtExecutor.execute(() -> {
+                    android.graphics.BitmapFactory.Options opts = new android.graphics.BitmapFactory.Options();
+                    opts.inSampleSize = 16;
+                    Bitmap crop = android.graphics.BitmapFactory.decodeFile(wp.getAbsolutePath(), opts);
+                    if (crop != null) grid.post(() -> {
+                        if (!isDestroyed() && !isFinishing() && dockDecoration != null) dockDecoration.setBackdropCrop(crop);
+                    });
+                });
+            }
+        }
         if (cfg.fadeRows) TopFade.attach(grid, 48 * density);
         // Reduced motion: the tiles are simply there, with no entrance (reloadApps skips it there too).
         if (animations && !reducedMotion) {
@@ -893,7 +929,25 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
                 wifiOfflineTint = getColorStateList(R.color.pill_icon_offline);
             }
         }
-        if (cfg.topMenu) {
+        controlCenterEnabled = cfg.controlCenter;
+        if (cfg.controlCenter) {
+            showInputsPill = false;
+            btnInputs.setVisibility(View.GONE);
+            btnWifi.setVisibility(View.GONE);
+            btnVpn.setVisibility(View.GONE);
+            btnReorder.setVisibility(View.GONE);
+            btnLibraryTop.setVisibility(View.GONE);
+            ((TextView) btnSettings).setText(R.string.settings);
+            ((TextView) btnSettings).setCompoundDrawablesRelativeWithIntrinsicBounds(R.drawable.ic_settings, 0, 0, 0);
+            if (!iconOnlyButtons) makeIconOnly((TextView) btnSettings);
+            btnSettings.setOnClickListener(v -> showControlCenter());
+            LinearLayout topButtons = findViewById(R.id.topButtons);
+            RelativeLayout.LayoutParams tlp = (RelativeLayout.LayoutParams) topButtons.getLayoutParams();
+            tlp.addRule(RelativeLayout.ALIGN_TOP, R.id.leftBlock);
+            tlp.bottomMargin = 0;
+            topButtons.setLayoutParams(tlp);
+            topButtons.setGravity(Gravity.CENTER_VERTICAL);
+        } else if (cfg.topMenu) {
             // One gear: Inputs and Wi-Fi move into its dropdown. The Wi-Fi pill stays hidden but keeps its
             // label up to date, which the menu's Wi-Fi row shows.
             showInputsPill = false;
@@ -963,6 +1017,9 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         }
         if (festive) applyFestiveSkin((TextView) btnInputs, (TextView) btnSettings);
 
+        if (cfg.musicPill) {
+            musicPill = new MusicPill(this, cfg.musicPillCorner);
+        }
         // Hide the glass when focus leaves the tiles.
         // Taken off in onDestroy: recreate() keeps the window, and a listener left on it held every earlier Home.
         getWindow().getDecorView().getViewTreeObserver().addOnGlobalFocusChangeListener(glassFocusListener);
@@ -1171,6 +1228,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         if (gameDay != null) gameDay.start();
         sky.update();
         wallpaperPlayer.start();
+        if (musicPill != null) musicPill.attach(root);
         handler.postDelayed(minuteTick, MINUTE_MS);
         if (festive && lamp != null) {
             lamp.start();
@@ -1422,6 +1480,12 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         RemoteKeys.release(this);
         cancelHoldOk();
         if (gameDay != null) gameDay.shutdown();
+        if (heroArtExecutor != null) heroArtExecutor.shutdownNow();
+        if (controlCenterDialog != null && controlCenterDialog.isShowing()) controlCenterDialog.dismiss();
+        if (musicPill != null) {
+            musicPill.hide();
+            musicPill.detach();
+        }
         unregisterReceiver(packageReceiver);
         if (openOnStartOnWake) unregisterReceiver(wakeReceiver);
         wallpaperPlayer.close();
@@ -1475,6 +1539,25 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         // taken after that would arm one nothing releases.
         if (resumed && event.getKeyCode() >= 1000 && RemoteKeys.handle(this, event, homeAppKeys.get(event.getKeyCode()),
                 homeHoldAppKeys.get(event.getKeyCode()))) return true;
+        if (controlCenterEnabled && !reordering) {
+            int kc = event.getKeyCode();
+            if (kc == KeyEvent.KEYCODE_SETTINGS) {
+                if (event.getAction() == KeyEvent.ACTION_UP && !event.isCanceled()) showControlCenter();
+                return true;
+            }
+            if (kc == KeyEvent.KEYCODE_BACK) {
+                if (event.getAction() == KeyEvent.ACTION_DOWN) {
+                    if (event.getRepeatCount() == 0) backLongPressed = false;
+                    if (!backLongPressed && (event.isLongPress() || event.getRepeatCount() > 0)) {
+                        backLongPressed = true;
+                        showControlCenter();
+                    }
+                } else if (event.getAction() == KeyEvent.ACTION_UP && backLongPressed) {
+                    backLongPressed = false;
+                    return true;
+                }
+            }
+        }
         if (handleSettingsKey(event)) return true;
         if (holdOk(event)) return true;
         if (tileMenuEnabled && !reordering && openPopup == null && cardPrompt == null
@@ -1997,7 +2080,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         int color = adapter.ambientColorAt(position);
         float y = dockTopInRoot - 14 * density - 26 * density - hero.getHeight();
         boolean changed = !label.contentEquals(heroName.getText());
-        if (cinematic && heroArtAlpha > 0f) showHeroArt(position);
+        if ((cinematic || heroArtEnabled) && heroArtAlpha > 0f) showHeroArt(position);
 
         if (!animations || reducedMotion) {
             // Snap the shelf instead of sliding and fading it: each of those frames repaints the
@@ -2117,26 +2200,50 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
     private void showHeroArt(int position) {
         String key = adapter.keyAt(position);
         if (key == null) return;
+        final int gen = ++heroArtGeneration;
         heroArt.animate().cancel();
         if (key.equals(heroArtKey)) {
-            fadeHeroArt(420);
+            fadeHeroArt(heroArtEnabled ? 350 : 420);
             return;
         }
-        Bitmap art = heroArtCache.get(key);
-        if (art == null) {
-            art = HeroArt.from(adapter.artworkAt(position));
-            if (art != null) heroArtCache.put(key, art);
+        Bitmap cached = heroArtCache.get(key);
+        if (cached != null) {
+            applyHeroBitmap(key, cached);
+            return;
         }
+        final File heroFile = heroArtEnabled ? HeroArt.findHeroFile(Config.dir(this), adapter.packageAt(position)) : null;
+        if (heroFile == null) {
+            Bitmap art = HeroArt.from(adapter.artworkAt(position));
+            if (art != null) heroArtCache.put(key, art);
+            applyHeroBitmap(key, art);
+            return;
+        }
+        final Drawable fallbackDrawable = adapter.artworkAt(position);
+        if (heroArtExecutor == null) heroArtExecutor = java.util.concurrent.Executors.newSingleThreadExecutor();
+        final int w = root.getWidth() > 0 ? root.getWidth() : getResources().getDisplayMetrics().widthPixels;
+        final int h = root.getHeight() > 0 ? root.getHeight() : getResources().getDisplayMetrics().heightPixels;
+        heroArtExecutor.execute(() -> {
+            Bitmap decoded = HeroArt.decodeHero(heroFile, w, h);
+            handler.post(() -> {
+                if (gen != heroArtGeneration || isDestroyed() || isFinishing()) return;
+                Bitmap next = decoded != null ? decoded : HeroArt.from(fallbackDrawable);
+                if (next != null) heroArtCache.put(key, next);
+                applyHeroBitmap(key, next);
+            });
+        });
+    }
+
+    private void applyHeroBitmap(String key, Bitmap next) {
         heroArtKey = key;
-        final Bitmap next = art;
+        int fadeInMs = heroArtEnabled ? 350 : 420;
         if (!animations || reducedMotion || heroArt.getAlpha() == 0f) {
             heroArt.setImageBitmap(next);
-            fadeHeroArt(600);
+            fadeHeroArt(heroArtEnabled ? 350 : 600);
             return;
         }
         heroArt.animate().alpha(0f).setDuration(140).withEndAction(() -> {
             heroArt.setImageBitmap(next);
-            heroArt.animate().alpha(heroArtAlpha).setDuration(420).start();
+            heroArt.animate().alpha(heroArtAlpha).setDuration(fadeInMs).start();
         }).start();
     }
 
@@ -3758,6 +3865,28 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
     // ---- launcher settings and module cards -------------------------------------------------------
 
     /** top_menu: the gear's dropdown, standing in for the Inputs, Wi-Fi and Settings pills. */
+    private void showControlCenter() {
+        if (controlCenterDialog != null && controlCenterDialog.isShowing()) return;
+        if (musicPill != null) musicPill.refreshMetadata();
+        controlCenterDialog = ControlCenter.show(this, this);
+    }
+
+    @Override public void onInputs() { showInputs(); }
+    @Override public void onWifi() { openNetworkPill(); }
+    @Override public void onScreensaver() { startActivity(new Intent(this, ClockActivity.class)); }
+    @Override public void onLibrary() { onLibraryRequested(); }
+    @Override public void onReorder() { toggleReorder(); }
+    @Override public void onSettings() {
+        startActivityForResult(new Intent(this, LauncherSettingsActivity.class), LAUNCHER_SETTINGS_REQUEST);
+    }
+    @Override public void onMediaPlayPause() { if (musicPill != null) musicPill.playPause(); }
+    @Override public void onMediaNext() { if (musicPill != null) musicPill.nextTrack(); }
+    @Override public void onToggleMusicPill() { if (musicPill != null) musicPill.toggle(); }
+    @Override public boolean isMusicPillVisible() { return musicPill != null && musicPill.isVisible(); }
+    @Override public String nowPlayingTitle() { return musicPill != null ? musicPill.getNowPlaying().title : ""; }
+    @Override public String nowPlayingArtist() { return musicPill != null ? musicPill.getNowPlaying().artist : ""; }
+    @Override public boolean isMediaPlaying() { return musicPill != null && musicPill.getNowPlaying().playing; }
+
     private void showTopMenu() {
         View anchor = findViewById(R.id.btnSettings);
         View panel = getLayoutInflater().inflate(R.layout.popup_inputs, root, false);

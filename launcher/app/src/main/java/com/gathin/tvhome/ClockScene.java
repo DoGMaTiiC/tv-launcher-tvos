@@ -13,8 +13,12 @@ import android.graphics.drawable.LayerDrawable;
 import android.os.Handler;
 import android.os.Looper;
 import android.util.DisplayMetrics;
+import android.view.Gravity;
 import android.view.View;
+import android.view.ViewGroup;
+import android.widget.FrameLayout;
 import android.widget.ImageView;
+import android.widget.VideoView;
 
 import java.io.File;
 import java.time.LocalDateTime;
@@ -63,6 +67,10 @@ final class ClockScene {
     private String order;
     private Map<String, Set<String>> moods;
     private String latitude, longitude;
+    /** Local Aerial Screensaver MP4s from aerial/ or wallpapers/; played muted in a loop behind dreamContent. */
+    private List<File> aerialVideos;
+    private int aerialIndex;
+    private VideoView aerialVideo;
 
     private final Runnable tick = new Runnable() {
         @Override
@@ -97,7 +105,11 @@ final class ClockScene {
         handler.removeCallbacks(tick);
         handler.postDelayed(tick, MOVE_MS);
         clockRefresh.start();
-        if (wallpaperFile != null && !wallpaperShown) loadWallpaper();
+        if (aerialVideos != null && !aerialVideos.isEmpty()) {
+            startAerialVideo(aerialVideos.get(aerialIndex));
+        } else if (wallpaperFile != null && !wallpaperShown) {
+            loadWallpaper();
+        }
     }
 
     void stop() {
@@ -105,6 +117,7 @@ final class ClockScene {
         clockRefresh.stop();
         content.animate().cancel();
         wallpaperGeneration++;   // a decode still running must not attach its picture to a stopped scene
+        stopAerialVideo();
     }
 
     /**
@@ -115,6 +128,8 @@ final class ClockScene {
      * Call before start(), which starts the decode (again after a stop() that dropped an unfinished one).
      */
     void useHomeWallpaper(Context ctx) {
+        aerialVideos = HeroArt.listAerialVideos(Config.dir(ctx));
+        aerialIndex = 0;
         Config cfg;
         try {
             cfg = Config.load(ctx);
@@ -123,7 +138,7 @@ final class ClockScene {
         }
         if (!cfg.clockWallpaper) {
             // clock_glow false: plain black behind the clock (OLED); the clock itself still moves every minute.
-            if (!cfg.clockGlow) {
+            if (!cfg.clockGlow && aerialVideos.isEmpty()) {
                 wallpaperShown = true;   // also stops the glow's colour cycle
                 ambient.setBackground(null);
             }
@@ -151,6 +166,51 @@ final class ClockScene {
         }
         wallpaperShade = (cfg.clockWallpaperDim * 255 / 100) << 24;
         wallpaperRes = ctx.getResources();
+    }
+
+    private void startAerialVideo(File videoFile) {
+        if (!(content.getParent() instanceof ViewGroup)) {
+            if (wallpaperFile != null && !wallpaperShown) loadWallpaper();
+            return;
+        }
+        ViewGroup container = (ViewGroup) content.getParent();
+        stopAerialVideo();
+        VideoView video = new VideoView(content.getContext());
+        FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                Gravity.CENTER);
+        video.setLayoutParams(lp);
+        video.setFocusable(false);
+        video.setFocusableInTouchMode(false);
+        video.setOnPreparedListener(mp -> {
+            mp.setLooping(true);
+            mp.setVolume(0f, 0f);
+            video.start();
+        });
+        video.setOnErrorListener((mp, what, extra) -> {
+            stopAerialVideo();
+            ambient.setVisibility(View.VISIBLE);
+            wallpaperShown = false;
+            if (wallpaperFile != null) loadWallpaper();
+            return true;
+        });
+        ambient.setVisibility(View.GONE);
+        wallpaperShown = true;
+        container.addView(video, 0);
+        aerialVideo = video;
+        video.setVideoPath(videoFile.getPath());
+    }
+
+    private void stopAerialVideo() {
+        if (aerialVideo == null) return;
+        aerialVideo.setOnPreparedListener(null);
+        aerialVideo.setOnErrorListener(null);
+        aerialVideo.stopPlayback();
+        if (aerialVideo.getParent() instanceof ViewGroup) {
+            ((ViewGroup) aerialVideo.getParent()).removeView(aerialVideo);
+        }
+        aerialVideo = null;
     }
 
     private void loadWallpaper() {
