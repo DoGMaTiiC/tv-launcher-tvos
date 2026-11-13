@@ -179,6 +179,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener, C
     private MusicPill musicPill;
     private Dialog controlCenterDialog;
     private DockDecoration dockDecoration;
+    private boolean dockBlur;
     private boolean controlCenterEnabled;
     private boolean backLongPressed;
     /** The focus glow's colour while the cinematic shelf tints it, 0 for plain white glass. */
@@ -716,6 +717,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener, C
             }
         });
         if (dockRow) {
+            dockBlur = cfg.dockBlur;
             dockDecoration = new DockDecoration(COLUMNS, density, cinematic, cfg.alwaysShowNames && !cfg.dockBlur, cfg.dockOpacity, cfg.dockGlass, cfg.dockEvenPadding, cfg.dockBand,
                     singleRow, cfg.dockBandAll, cfg.dockBlur);
             grid.addItemDecoration(dockDecoration);
@@ -1228,7 +1230,10 @@ public class MainActivity extends Activity implements AppAdapter.TileListener, C
         if (gameDay != null) gameDay.start();
         sky.update();
         wallpaperPlayer.start();
-        if (musicPill != null) musicPill.attach(root);
+        if (musicPill != null) {
+            musicPill.attach(root);
+            grid.post(() -> { if (!isDestroyed() && musicPill != null) musicPill.show(); });
+        }
         handler.postDelayed(minuteTick, MINUTE_MS);
         if (festive && lamp != null) {
             lamp.start();
@@ -2235,6 +2240,10 @@ public class MainActivity extends Activity implements AppAdapter.TileListener, C
 
     private void applyHeroBitmap(String key, Bitmap next) {
         heroArtKey = key;
+        if (dockBlur && dockDecoration != null && next != null) {
+            dockDecoration.setBackdropCrop(next);
+            grid.invalidateItemDecorations();
+        }
         int fadeInMs = heroArtEnabled ? 350 : 420;
         if (!animations || reducedMotion || heroArt.getAlpha() == 0f) {
             heroArt.setImageBitmap(next);
@@ -2256,7 +2265,15 @@ public class MainActivity extends Activity implements AppAdapter.TileListener, C
     private void updateHeroMeta(int position) {
         long when = LastOpened.get(this, adapter.packageAt(position));
         if (when <= 0) {
-            heroMeta.setVisibility(View.INVISIBLE);
+            if (heroArtEnabled || tileTilt) {
+                String tag = "APPLE TV HOME";
+                SpannableString s = new SpannableString(tag + "  \u00B7  Press OK to open");
+                s.setSpan(new ForegroundColorSpan(0xFFFFFFFF), 0, tag.length(), Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+                heroMeta.setText(s);
+                heroMeta.setVisibility(View.VISIBLE);
+            } else {
+                heroMeta.setVisibility(View.INVISIBLE);
+            }
             return;
         }
         String rel = LastOpened.describe(this, when);

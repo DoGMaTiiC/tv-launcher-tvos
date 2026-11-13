@@ -506,11 +506,11 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
         // A fully opaque banner covers the whole card (centerCrop), so the card's own fill under it is drawn for
         // nothing on every frame; keep it under banners with transparent parts and under icon tiles.
         h.card.setBackground(e.banner != null && e.banner.getOpacity() == PixelFormat.OPAQUE ? null : h.cardBackground);
-        if (uniformTiles && e.banner == null) {
+        if (tileTilt && (uniformTiles || e.banner == null)) {
+            h.card.setBackground(smokedGlassCard(ctx.getResources().getDisplayMetrics().density, ambientColorAt(position)));
+        } else if (uniformTiles && e.banner == null) {
             if (e.backdrop == null) e.backdrop = backdrop(e.icon, ambientColorAt(position));
             h.card.setBackground(new GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, e.backdrop));
-        } else if (tileTilt && e.banner == null) {
-            h.card.setBackground(smokedGlassCard(ctx.getResources().getDisplayMetrics().density));
         }
         if (e.banner != null) {
             h.icon.setImageDrawable(null);
@@ -697,10 +697,11 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
         return !animations ? 1f : tileTilt ? TileTilt.FOCUS_SCALE : advancedEffects ? 1.12f : 1.10f;
     }
 
-    private static GradientDrawable smokedGlassCard(float density) {
-        GradientDrawable d = new GradientDrawable();
-        d.setColor(0x1AFFFFFF);
-        d.setStroke(Math.max(1, Math.round(density)), 0x2EFFFFFF);
+    private static GradientDrawable smokedGlassCard(float density, int accent) {
+        int top = (mix(0xFF1C1E2A, accent, 0.38f) & 0x00FFFFFF) | 0xD8000000;
+        int bot = (mix(0xFF0E1018, accent, 0.16f) & 0x00FFFFFF) | 0xEA000000;
+        GradientDrawable d = new GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, new int[]{top, bot});
+        d.setStroke(Math.max(1, Math.round(1.2f * density)), 0x48FFFFFF);
         d.setCornerRadius(16f * density);
         return d;
     }

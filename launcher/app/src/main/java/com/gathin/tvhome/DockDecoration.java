@@ -90,7 +90,8 @@ public class DockDecoration extends RecyclerView.ItemDecoration {
         this.backdropBitmap = softened;
         if (softened != null) {
             this.backdropShader = new BitmapShader(softened, Shader.TileMode.CLAMP, Shader.TileMode.CLAMP);
-            this.backdropSrc.set(0f, 0f, softened.getWidth(), softened.getHeight());
+            int w = softened.getWidth(), h = softened.getHeight();
+            this.backdropSrc.set(0f, h * 0.65f, w, h * 0.92f);
             this.backdropPaint.setShader(this.backdropShader);
         } else {
             this.backdropShader = null;
@@ -177,6 +178,18 @@ public class DockDecoration extends RecyclerView.ItemDecoration {
             rect.right = Math.min(rect.right, parent.getWidth() - density);
         }
         rect.bottom += namesRoom;
+        if (dockBlur) {
+            Shader savedShader = band.getShader();
+            int savedColor = band.getColor();
+            band.setShader(null);
+            band.setColor(0x50000000);
+            float shadowDy = 4f * density;
+            rect.offset(0f, shadowDy);
+            c.drawRoundRect(rect, radius, radius, band);
+            rect.offset(0f, -shadowDy);
+            band.setColor(savedColor);
+            band.setShader(savedShader);
+        }
         if (dockBlur && backdropShader != null) {
             if (rect.left != backdropLeft || rect.top != backdropTop
                     || rect.right != backdropRight || rect.bottom != backdropBottom) {
@@ -191,8 +204,14 @@ public class DockDecoration extends RecyclerView.ItemDecoration {
         }
         int[] gradientColors = DockBlur.frostedGradientColors(dockBlur, lightGlass);
         if (gradientColors != null && (rect.top != shaderTop || rect.bottom != shaderBottom)) {
-            band.setShader(new LinearGradient(0, rect.top, 0, rect.bottom, gradientColors[0], gradientColors[1],
-                    Shader.TileMode.CLAMP));
+            band.setShader(dockBlur
+                    ? new LinearGradient(0, rect.top, 0, rect.bottom,
+                            new int[]{0x38FFFFFF, 0x18141824, 0x24FFFFFF}, new float[]{0f, 0.55f, 1f}, Shader.TileMode.CLAMP)
+                    : new LinearGradient(0, rect.top, 0, rect.bottom, gradientColors[0], gradientColors[1], Shader.TileMode.CLAMP));
+            if (dockBlur) {
+                edge.setShader(new LinearGradient(0, rect.top, 0, rect.bottom,
+                        new int[]{0x90FFFFFF, 0x24FFFFFF, 0x48FFFFFF}, new float[]{0f, 0.5f, 1f}, Shader.TileMode.CLAMP));
+            }
             shaderTop = rect.top;
             shaderBottom = rect.bottom;
         }

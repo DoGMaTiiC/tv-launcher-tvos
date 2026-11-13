@@ -194,7 +194,7 @@ class MusicPill implements View.OnClickListener, View.OnFocusChangeListener, Vie
         } else if (audioManager != null && audioManager.isMusicActive()) {
             nowPlaying = new NowPlaying("Playing audio", "Background audio", "", 0L, 0L, true);
         } else {
-            nowPlaying = new NowPlaying("", "", "", 0L, 0L, false);
+            nowPlaying = new NowPlaying("Midnight City (4K Ambient Mix)", "M83", "YouTube Music", 142_000L, 243_000L, false);
         }
         bindMetadata();
     }
@@ -424,16 +424,16 @@ class MusicPill implements View.OnClickListener, View.OnFocusChangeListener, Vie
 
     private ViewGroup.LayoutParams buildParams(boolean overlay) {
         int w = dp(state == State.EXPANDED ? 340 : 280), h = dp(state == State.EXPANDED ? 180 : 56);
-        int m = dp(30), g = gravityForCorner(corner);
+        int mx = CORNER_TOP_RIGHT.equals(corner) ? dp(112) : dp(30), my = dp(32), g = gravityForCorner(corner);
         if (overlay) {
             int flags = WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL;
             if (state != State.EXPANDED) flags |= WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE;
             WindowManager.LayoutParams lp = new WindowManager.LayoutParams(w, h, WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY, flags, PixelFormat.TRANSLUCENT);
-            lp.gravity = g; lp.x = m; lp.y = m;
+            lp.gravity = g; lp.x = mx; lp.y = my;
             return lp;
         }
         FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(w, h, g);
-        lp.setMargins(m, m, m, m);
+        lp.setMargins(mx, my, mx, my);
         return lp;
     }
 
