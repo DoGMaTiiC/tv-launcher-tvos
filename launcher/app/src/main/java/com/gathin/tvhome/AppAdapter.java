@@ -188,6 +188,8 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
     private final boolean singleRow;
     /** config always_show_names: the alpha of an unfocused tile's name (0 hides it). */
     private final float restNameAlpha;
+    private final float gridRestNameAlpha;
+    private final boolean tileTilt;
     /** cinematic_home: only then does a launch record the last-opened app the shelf uses. */
     private final boolean cinematic;
     /** Dock order (config.xml dock_apps, or a theme's config.json). */
@@ -232,6 +234,7 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
         this.libraryPreload = new HashSet<>(cfg.libraryApps);
         this.animations = cfg.animations;
         this.advancedEffects = cfg.animations && cfg.advancedEffects;
+        this.tileTilt = cfg.animations && cfg.tileTilt;
         this.showHomeSettings = cfg.showHomeSettingsShortcut;
         this.showLibrary = LibraryApps.showPill(cfg.appLibrary, cfg.libraryButton, cfg.showLibraryPill);
         this.reducedMotion = cfg.reducedMotion;
@@ -241,6 +244,7 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
         this.dockRow = cfg.dockRow;
         this.singleRow = cfg.singleRow;
         this.restNameAlpha = cfg.alwaysShowNames ? 0.75f : 0f;
+        this.gridRestNameAlpha = cfg.alwaysShowNames ? 0.75f : (this.tileTilt ? 0.65f : 0f);
         this.cinematic = cfg.cinematicHome;
         this.launchActions = cfg.launchActions;
         this.iconTiles = new HashSet<>(Arrays.asList(ctx.getResources().getStringArray(R.array.icon_tiles)));
@@ -452,7 +456,11 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
             View label = v.findViewById(R.id.label);
             label.setPadding(label.getPaddingLeft(), label.getPaddingTop(), label.getPaddingRight(), Math.round(4f * density));
         }
-        return new Holder(v, listener, animations, advancedEffects, reducedMotion, restNameAlpha, focusOvershoot);
+        Holder holder = new Holder(v, listener, animations, advancedEffects, tileTilt, reducedMotion, restNameAlpha, focusOvershoot);
+        if (tileTilt) {
+            holder.card.setCameraDistance(TileTilt.cameraDistancePx(ctx.getResources().getDisplayMetrics().density));
+        }
+        return holder;
     }
 
     @Override
@@ -478,22 +486,31 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
         // The dock has no labels, unless always_show_names asks for them (DockDecoration then makes room in the band).
         // In a single row every tile is the dock's kind: the big title above names it.
         boolean dockKind = DockSlots.inDockRow(dockRow, singleRow, position, dockSize);
-        h.name.setVisibility(dockKind && restNameAlpha == 0f ? View.INVISIBLE : View.VISIBLE);
+        float tileRestAlpha = dockKind ? restNameAlpha : gridRestNameAlpha;
+        h.name.setVisibility(dockKind && tileRestAlpha == 0f ? View.INVISIBLE : View.VISIBLE);
         h.inDock = dockKind;
+        h.currentRestNameAlpha = tileRestAlpha;
         boolean focused = h.card.isFocused();   // a rebind after reload() can hit the focused tile
-        h.name.setAlpha(focused ? 1f : restNameAlpha);
+        h.name.setAlpha(focused ? 1f : tileRestAlpha);
         h.card.setScaleX(focused && animations ? focusScale() : 1f);
         h.card.setScaleY(focused && animations ? focusScale() : 1f);
         h.card.setTranslationY(focused && advancedEffects && !dockKind ? -4f * ctx.getResources().getDisplayMetrics().density : 0f);
         h.card.setTranslationZ(focused && advancedEffects ? 8f * ctx.getResources().getDisplayMetrics().density : 0f);
-        h.banner.setScaleX(focused && advancedEffects ? 1.035f : 1f);
-        h.banner.setScaleY(focused && advancedEffects ? 1.035f : 1f);
+        if (!focused) {
+            h.card.setRotationX(0f);
+            h.card.setRotationY(0f);
+        }
+        boolean parallax = focused && (advancedEffects || tileTilt);
+        h.banner.setScaleX(parallax ? TileTilt.BANNER_PARALLAX_SCALE : 1f);
+        h.banner.setScaleY(parallax ? TileTilt.BANNER_PARALLAX_SCALE : 1f);
         // A fully opaque banner covers the whole card (centerCrop), so the card's own fill under it is drawn for
         // nothing on every frame; keep it under banners with transparent parts and under icon tiles.
         h.card.setBackground(e.banner != null && e.banner.getOpacity() == PixelFormat.OPAQUE ? null : h.cardBackground);
         if (uniformTiles && e.banner == null) {
             if (e.backdrop == null) e.backdrop = backdrop(e.icon, ambientColorAt(position));
             h.card.setBackground(new GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, e.backdrop));
+        } else if (tileTilt && e.banner == null) {
+            h.card.setBackground(smokedGlassCard(ctx.getResources().getDisplayMetrics().density));
         }
         if (e.banner != null) {
             h.icon.setImageDrawable(null);
@@ -677,7 +694,15 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
     }
 
     float focusScale() {
-        return !animations ? 1f : advancedEffects ? 1.12f : 1.10f;
+        return !animations ? 1f : tileTilt ? TileTilt.FOCUS_SCALE : advancedEffects ? 1.12f : 1.10f;
+    }
+
+    private static GradientDrawable smokedGlassCard(float density) {
+        GradientDrawable d = new GradientDrawable();
+        d.setColor(0x1AFFFFFF);
+        d.setStroke(Math.max(1, Math.round(density)), 0x2EFFFFFF);
+        d.setCornerRadius(16f * density);
+        return d;
     }
 
     /** A vivid colour sampled from the app's banner (or icon), cached per entry; a card's accent when it set one. */
@@ -910,14 +935,16 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
         final TextView name;
         final boolean animations;
         final boolean advancedEffects;
+        final boolean tileTilt;
         final boolean reducedMotion;
-        /** Alpha of the name while the tile is not focused (always_show_names). */
+        /** Alpha of the name while the tile is not focused (always_show_names or tile_tilt grid). */
         final float restNameAlpha;
+        float currentRestNameAlpha;
         final boolean overshoot;
         /** A dock tile: it grows in place without advanced_effects' lift, which reads as off-centre in the band (#2135). */
         boolean inDock;
 
-        Holder(View v, TileListener listener, boolean animations, boolean advancedEffects,
+        Holder(View v, TileListener listener, boolean animations, boolean advancedEffects, boolean tileTilt,
                boolean reducedMotion, float restNameAlpha, boolean overshoot) {
             super(v);
             card = v.findViewById(R.id.card);
@@ -928,8 +955,10 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
             name = v.findViewById(R.id.name);
             this.animations = animations;
             this.advancedEffects = advancedEffects;
+            this.tileTilt = tileTilt;
             this.reducedMotion = reducedMotion;
             this.restNameAlpha = restNameAlpha;
+            this.currentRestNameAlpha = restNameAlpha;
             this.overshoot = overshoot;
 
             final float density = v.getResources().getDisplayMetrics().density;
@@ -954,16 +983,18 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
                 view.animate().cancel();
                 banner.animate().cancel();
                 name.animate().cancel();
-                float scale = !animations ? 1f : advancedEffects ? 1.12f : 1.10f;
+                float scale = !animations ? 1f : tileTilt ? TileTilt.FOCUS_SCALE : advancedEffects ? 1.12f : 1.10f;
                 float s = focused ? scale : 1f;
                 if (!animations) {
                     view.setScaleX(1f);
                     view.setScaleY(1f);
                     view.setTranslationY(0f);
                     view.setTranslationZ(0f);
+                    view.setRotationX(0f);
+                    view.setRotationY(0f);
                     banner.setScaleX(1f);
                     banner.setScaleY(1f);
-                    name.setAlpha(focused ? 1f : restNameAlpha);
+                    name.setAlpha(focused ? 1f : currentRestNameAlpha);
                     name.setTranslationY(0f);
                 } else if (reducedMotion) {
                     // A short zoom with no hardware layer: building a layer for so short an animation costs more
@@ -974,7 +1005,15 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
                             .setDuration(focused ? Motion.REDUCED_MS : 60)
                             .setInterpolator(new DecelerateInterpolator())
                             .start();
-                    name.setAlpha(focused ? 1f : restNameAlpha);
+                    if (!focused) {
+                        view.setRotationX(0f);
+                        view.setRotationY(0f);
+                    }
+                    if (advancedEffects || tileTilt) {
+                        banner.setScaleX(focused ? TileTilt.BANNER_PARALLAX_SCALE : 1f);
+                        banner.setScaleY(focused ? TileTilt.BANNER_PARALLAX_SCALE : 1f);
+                    }
+                    name.setAlpha(focused ? 1f : currentRestNameAlpha);
                     // Same place as the full motion's slide ends: the layout's -6dp is only its starting point, and
                     // left there the name overlaps the zoomed tile.
                     // Only on focus: snapping it back to -6dp while it fades out would jump it up over the tile.
@@ -987,11 +1026,16 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
                             .setInterpolator(focused && !overshoot ? new DecelerateInterpolator(1.5f)
                                     : new OvershootInterpolator(focused ? (advancedEffects ? 0.7f : 1.6f) : 0f))
                             .withLayer().start();
-                    if (advancedEffects) {
-                        banner.animate().scaleX(focused ? 1.035f : 1f).scaleY(focused ? 1.035f : 1f)
+                    if (!focused) {
+                        view.setRotationX(0f);
+                        view.setRotationY(0f);
+                    }
+                    if (advancedEffects || tileTilt) {
+                        banner.animate().scaleX(focused ? TileTilt.BANNER_PARALLAX_SCALE : 1f)
+                                .scaleY(focused ? TileTilt.BANNER_PARALLAX_SCALE : 1f)
                                 .setDuration(280).start();
                     }
-                    name.animate().alpha(focused ? 1f : restNameAlpha)
+                    name.animate().alpha(focused ? 1f : currentRestNameAlpha)
                             .translationY(focused ? density * 4f : -density * 6f)
                             .setDuration(220).start();
                 }

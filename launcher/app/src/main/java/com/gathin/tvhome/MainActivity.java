@@ -71,6 +71,7 @@ import android.widget.TextView;
 import android.widget.Toast;
 
 import androidx.annotation.NonNull;
+import androidx.dynamicanimation.animation.DynamicAnimation;
 import androidx.dynamicanimation.animation.FloatPropertyCompat;
 import androidx.dynamicanimation.animation.SpringAnimation;
 import androidx.dynamicanimation.animation.SpringForce;
@@ -181,6 +182,10 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
     private boolean heroShown;
     private boolean animations;
     private boolean advancedEffects;
+    private boolean tileTilt;
+    private SpringAnimation tiltSpringX, tiltSpringY;
+    private View tiltedCard;
+    private float lastTileCenterX = Float.NaN, lastTileCenterY = Float.NaN;
     private TextView greeting;
     private View clockBlock;
     private View btnInputs;
@@ -479,6 +484,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         COLUMNS = cfg.columns;
         animations = cfg.animations;
         advancedEffects = cfg.animations && cfg.advancedEffects;
+        tileTilt = cfg.animations && cfg.tileTilt;
         reducedMotion = cfg.reducedMotion;
         dockRow = cfg.dockRow;
         singleRow = cfg.singleRow;
@@ -816,6 +822,31 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
             } else {
                 s.setSpring(new SpringForce().setStiffness(advancedEffects ? 320f : 260f)
                         .setDampingRatio(advancedEffects ? 0.76f : 0.58f));
+            }
+        }
+        if (tileTilt) {
+            glass.setCameraDistance(TileTilt.cameraDistancePx(density));
+            tiltSpringX = new SpringAnimation(glass, DynamicAnimation.ROTATION_X, 0f);
+            tiltSpringY = new SpringAnimation(glass, DynamicAnimation.ROTATION_Y, 0f);
+            for (SpringAnimation s : new SpringAnimation[]{tiltSpringX, tiltSpringY}) {
+                s.setSpring(Motion.tiltForce(reducedMotion));
+                s.setMinimumVisibleChange(0.1f);
+                s.addUpdateListener((animation, value, velocity) -> {
+                    if (tiltedCard != null && tiltedCard.isFocused()) {
+                        tiltedCard.setRotationX(glass.getRotationX());
+                        tiltedCard.setRotationY(glass.getRotationY());
+                    }
+                    glass.setSpecularShift(TileTilt.specularShift(glass.getRotationX(), glass.getRotationY()));
+                });
+                s.addEndListener((animation, canceled, value, velocity) -> {
+                    if (!canceled && !tiltSpringX.isRunning() && !tiltSpringY.isRunning()) {
+                        if (tiltedCard != null) {
+                            tiltedCard.setRotationX(0f);
+                            tiltedCard.setRotationY(0f);
+                        }
+                        glass.setSpecularShift(0f);
+                    }
+                });
             }
         }
 
@@ -1867,6 +1898,15 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
             if (animations && !reducedMotion) glass.animate().alpha(1f).setDuration(180).start();
             else glass.setAlpha(1f);
             glassShown = true;
+            if (tileTilt) {
+                if (tiltedCard != null && tiltedCard != card) {
+                    tiltedCard.setRotationX(0f);
+                    tiltedCard.setRotationY(0f);
+                }
+                tiltedCard = card;
+                lastTileCenterX = r.exactCenterX();
+                lastTileCenterY = r.exactCenterY();
+            }
         } else if (!animations) {
             springX.cancel();
             springY.cancel();
@@ -1875,6 +1915,34 @@ public class MainActivity extends Activity implements AppAdapter.TileListener {
         } else {
             springX.animateToFinalPosition(x - glassScrollShiftX);
             springY.animateToFinalPosition(y - glassScrollShift);
+            if (tileTilt) {
+                if (tiltedCard != null && tiltedCard != card) {
+                    tiltedCard.setRotationX(0f);
+                    tiltedCard.setRotationY(0f);
+                }
+                tiltedCard = card;
+                float cx = r.exactCenterX();
+                float cy = r.exactCenterY();
+                if (!Float.isNaN(lastTileCenterX)) {
+                    float dx = cx - lastTileCenterX;
+                    float dy = cy - lastTileCenterY;
+                    float rotY = TileTilt.rotationYForDx(dx, card.getWidth());
+                    float rotX = TileTilt.rotationXForDy(dy, card.getHeight());
+                    if (rotX != 0f || rotY != 0f) {
+                        tiltSpringX.cancel();
+                        tiltSpringY.cancel();
+                        glass.setRotationX(rotX);
+                        glass.setRotationY(rotY);
+                        card.setRotationX(rotX);
+                        card.setRotationY(rotY);
+                        glass.setSpecularShift(TileTilt.specularShift(rotX, rotY));
+                        tiltSpringX.animateToFinalPosition(0f);
+                        tiltSpringY.animateToFinalPosition(0f);
+                    }
+                }
+                lastTileCenterX = cx;
+                lastTileCenterY = cy;
+            }
         }
         View item = (View) card.getParent();
         if (dockRow && (singleRow || position < COLUMNS)) {

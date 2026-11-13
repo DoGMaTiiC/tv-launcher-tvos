@@ -3,6 +3,7 @@ package com.gathin.tvhome;
 import android.content.Context;
 import android.graphics.Canvas;
 import android.graphics.LinearGradient;
+import android.graphics.Matrix;
 import android.graphics.Paint;
 import android.graphics.RectF;
 import android.graphics.Shader;
@@ -29,6 +30,9 @@ public class GlassView extends View {
     /** glass_style rim or halo: no sheen and no fill, only the crisp rim (and, for halo, a lighter outer glow). */
     private boolean flat;
     private boolean halo;
+    private final Matrix specularMatrix = new Matrix();
+    private LinearGradient specularShader;
+    private float specularShift;
 
     public GlassView(Context context, AttributeSet attrs) {
         super(context, attrs);
@@ -78,7 +82,27 @@ public class GlassView extends View {
     protected void onSizeChanged(int w, int h, int oldw, int oldh) {
         super.onSizeChanged(w, h, oldw, oldh);
         fill.setShader(new LinearGradient(0, 0, 0, h, 0x3DFFFFFF, 0x12FFFFFF, Shader.TileMode.CLAMP));
-        specular.setShader(new LinearGradient(0, 0, 0, h * 0.45f, 0x66FFFFFF, 0x00FFFFFF, Shader.TileMode.CLAMP));
+        specularShader = new LinearGradient(0, 0, w * 0.35f, h * 0.45f, 0x66FFFFFF, 0x00FFFFFF, Shader.TileMode.CLAMP);
+        if (specularShift != 0f) {
+            specularMatrix.setTranslate(specularShift * w * 0.18f, -Math.abs(specularShift) * h * 0.08f);
+            specularShader.setLocalMatrix(specularMatrix);
+        }
+        specular.setShader(specularShader);
+    }
+
+    /**
+     * Shifts the glass specular sheen horizontally/vertically with quantized redraws
+     * (impulse start and return to 0f) so the hardware layer is not invalidated every spring frame.
+     */
+    void setSpecularShift(float shift) {
+        float clamped = TileTilt.clamp(shift, -1f, 1f);
+        if (Math.abs(clamped - specularShift) < 0.2f && (clamped != 0f || specularShift == 0f)) return;
+        specularShift = clamped;
+        if (specularShader != null) {
+            specularMatrix.setTranslate(clamped * getWidth() * 0.18f, -Math.abs(clamped) * getHeight() * 0.08f);
+            specularShader.setLocalMatrix(specularMatrix);
+        }
+        invalidate();
     }
 
     @Override

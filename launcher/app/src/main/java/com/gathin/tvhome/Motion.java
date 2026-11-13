@@ -20,4 +20,15 @@ final class Motion {
         spring.setSpring(new SpringForce().setStiffness(REDUCED_STIFFNESS).setDampingRatio(SpringForce.DAMPING_RATIO_NO_BOUNCY));
         spring.setMinimumVisibleChange(REDUCED_MIN_CHANGE);
     }
+
+    static SpringForce tiltForce(boolean reducedMotion) {
+        if (reducedMotion) {
+            return new SpringForce(0f)
+                    .setStiffness(REDUCED_STIFFNESS)
+                    .setDampingRatio(SpringForce.DAMPING_RATIO_NO_BOUNCY);
+        }
+        return new SpringForce(0f)
+                .setStiffness(TileTilt.TILT_STIFFNESS)
+                .setDampingRatio(TileTilt.TILT_DAMPING);
+    }
 }
