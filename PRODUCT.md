@@ -38,13 +38,11 @@ no boot). O launcher de fabrica permanece como reserva. TV chega entre 20 e 24 d
 
 ## Capabilities and Constraints
 
-- Flags de feature em `config.xml`, default off: `tile_tilt`, `dock_blur`, `hero_art`.
-- Sem blur por frame (`RenderEffect` proibido): dock blur sai de um crop pre-borrado.
-- Orcamento de frame duro: o path de clip/glow ja e software-rendered em parte da familia
-  MT589x; qualquer efeito novo precisa caber no mesmo custo.
-- Sem acesso a API privilegiada: nao existe "continuar assistindo" entre apps; no maximo
-  deep link por app.
-- Decisao de nao dar root na TV (perderia Widevine L1 e o 4K).
+- Fork personal-first para a TCL 65C6K (100% offline no launcher, sem permissao `INTERNET`), mantendo flags modulares em `config.xml` / `config.json`: `tile_tilt`, `dock_blur`, `hero_art`, `control_center`, `music_pill`.
+- Politica hibrida de Liquid Glass (ADR-0001): tudo o que anima com o D-pad (`Focus Slab` e `Glass Dock`) usa crop pre-borrado cacheado + otica especular em GPU (zero `RenderEffect` por frame); `RenderEffect` nativo (API 31+) e reservado apenas para avaliacao em overlays estaticos como o `Control Center`.
+- `Control Center` em vidro acionado por `Up` ou botao Settings, reunindo cartao `Now Playing` (`MediaSession`) e 5 atalhos essenciais (Entradas HDMI/TV, Wi-Fi/Rede, Imagem e Som, `Aerial Screensaver` e Configuracoes do Launcher).
+- `Music Pill` flutuante em Liquid Glass (ADR-0002): sobreposicao (`SYSTEM_ALERT_WINDOW`) ancorada em canto configuravel sobre qualquer app ou entrada HDMI (ex.: PS5) com suporte a audio em background (YouTube Music / `appops`).
+- Orcamento de frame duro de 60 fps em 4K; sem root na TV (preserva Widevine L1 e 4K).
 
 ## Brand Commitments
 
