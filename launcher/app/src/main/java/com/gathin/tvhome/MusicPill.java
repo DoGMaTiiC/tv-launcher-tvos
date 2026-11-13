@@ -75,7 +75,7 @@ class MusicPill implements View.OnClickListener, View.OnFocusChangeListener, Vie
     private FrameLayout fallbackRoot;
     private LinearLayout rootView, controlsRow;
     private TextView titleView, subtitleView, timeView, playPauseBtn;
-    private boolean attachedToWindowManager, attachedToFallback;
+    private boolean attachedToWm, attachedToFallback;
 
     MusicPill(Context ctx, String initialCorner) {
         this.ctx = ctx.getApplicationContext();
@@ -126,14 +126,13 @@ class MusicPill implements View.OnClickListener, View.OnFocusChangeListener, Vie
     void attach(FrameLayout fallbackRoot) {
         if (this.fallbackRoot != fallbackRoot) { detach(); this.fallbackRoot = fallbackRoot; }
         ensureViews();
-        if (attachedToWindowManager || attachedToFallback) { applyLayoutParams(); return; }
+        if (attachedToWm || attachedToFallback) { applyLayoutParams(); return; }
         boolean overlayOk = false;
         if (windowManager != null && Settings.canDrawOverlays(ctx)) {
             try {
-                windowManager.addView(rootView, (WindowManager.LayoutParams) buildParams(true));
-                attachedToWindowManager = true;
-                overlayOk = true;
-            } catch (WindowManager.BadTokenException | SecurityException | IllegalStateException ignored) {}
+                windowManager.addView(rootView, buildParams(true));
+                attachedToWm = overlayOk = true;
+            } catch (RuntimeException ignored) {}
         }
         if (!overlayOk && fallbackRoot != null) {
             if (rootView.getParent() instanceof ViewGroup) ((ViewGroup) rootView.getParent()).removeView(rootView);
@@ -142,27 +141,26 @@ class MusicPill implements View.OnClickListener, View.OnFocusChangeListener, Vie
         }
         refreshMetadata();
         applyStateVisuals();
-        if (state != State.HIDDEN) { handler.removeCallbacks(this); handler.postDelayed(this, 1000L); }
+        scheduleTick();
     }
 
     void show() {
         if (state == State.HIDDEN) state = State.COMPACT;
-        refreshMetadata(); applyStateVisuals(); applyLayoutParams();
-        handler.removeCallbacks(this); handler.postDelayed(this, 1000L);
+        syncAndSchedule();
     }
 
     void hide() {
         state = State.HIDDEN;
         handler.removeCallbacks(this);
-        applyStateVisuals(); applyLayoutParams();
+        applyStateVisuals();
+        applyLayoutParams();
     }
 
     void toggle() { if (nextStateOnToggle(state) == State.HIDDEN) hide(); else show(); }
 
     void expand() {
         state = State.EXPANDED;
-        refreshMetadata(); applyStateVisuals(); applyLayoutParams();
-        handler.removeCallbacks(this); handler.postDelayed(this, 1000L);
+        syncAndSchedule();
         if (playPauseBtn != null) playPauseBtn.requestFocus();
     }
 
@@ -172,6 +170,18 @@ class MusicPill implements View.OnClickListener, View.OnFocusChangeListener, Vie
     String getCorner() { return corner; }
     void setCorner(String corner) { this.corner = normalizeCorner(corner); applyLayoutParams(); }
     NowPlaying getNowPlaying() { return nowPlaying; }
+
+    private void syncAndSchedule() {
+        refreshMetadata();
+        applyStateVisuals();
+        applyLayoutParams();
+        scheduleTick();
+    }
+
+    private void scheduleTick() {
+        handler.removeCallbacks(this);
+        if (state != State.HIDDEN) handler.postDelayed(this, 1000L);
+    }
 
     void refreshMetadata() {
         MediaController active = findActiveController();
@@ -228,14 +238,13 @@ class MusicPill implements View.OnClickListener, View.OnFocusChangeListener, Vie
     void detach() {
         handler.removeCallbacks(this);
         if (rootView != null) {
-            if (attachedToWindowManager && windowManager != null) {
+            if (attachedToWm && windowManager != null) {
                 try { windowManager.removeViewImmediate(rootView); } catch (RuntimeException ignored) {}
             } else if (rootView.getParent() instanceof ViewGroup) {
                 ((ViewGroup) rootView.getParent()).removeView(rootView);
             }
         }
-        attachedToWindowManager = false;
-        attachedToFallback = false;
+        attachedToWm = attachedToFallback = false;
         fallbackRoot = null;
     }
 
@@ -272,11 +281,7 @@ class MusicPill implements View.OnClickListener, View.OnFocusChangeListener, Vie
         rootView.setOrientation(LinearLayout.VERTICAL);
         rootView.setGravity(Gravity.CENTER_VERTICAL);
         rootView.setPadding(dp(18), dp(10), dp(18), dp(10));
-        GradientDrawable bg = new GradientDrawable();
-        bg.setColor(FILL_COLOR);
-        bg.setCornerRadius(dp(28));
-        bg.setStroke(Math.max(1, Math.round(1.5f * density)), STROKE_COLOR);
-        rootView.setBackground(bg);
+        rootView.setBackground(pillBox(FILL_COLOR, STROKE_COLOR, dp(28), 1.5f));
         rootView.setElevation(dp(8));
         rootView.setFocusable(true);
         rootView.setClickable(true);
@@ -285,7 +290,6 @@ class MusicPill implements View.OnClickListener, View.OnFocusChangeListener, Vie
         rootView.setOnKeyListener(this);
 
         LinearLayout headerRow = new LinearLayout(ctx);
-        headerRow.setOrientation(LinearLayout.HORIZONTAL);
         headerRow.setGravity(Gravity.CENTER_VERTICAL);
         LinearLayout textCol = new LinearLayout(ctx);
         textCol.setOrientation(LinearLayout.VERTICAL);
@@ -296,14 +300,11 @@ class MusicPill implements View.OnClickListener, View.OnFocusChangeListener, Vie
         subtitleView = makeText(12, Typeface.DEFAULT, TEXT_SECONDARY);
         textCol.addView(titleView);
         textCol.addView(subtitleView);
-
         timeView = makeText(13, Typeface.MONOSPACE, TEXT_PRIMARY);
-        timeView.setText("0:00");
         headerRow.addView(textCol, textColLp);
         headerRow.addView(timeView);
 
         controlsRow = new LinearLayout(ctx);
-        controlsRow.setOrientation(LinearLayout.HORIZONTAL);
         controlsRow.setGravity(Gravity.CENTER);
         LinearLayout.LayoutParams controlsLp = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         controlsLp.topMargin = dp(14);
@@ -318,14 +319,13 @@ class MusicPill implements View.OnClickListener, View.OnFocusChangeListener, Vie
             btn.setFocusableInTouchMode(true);
             btn.setClickable(true);
             btn.setTag(i);
-            btn.setBackground(btnBg(false));
+            btn.setBackground(pillBox(0x18FFFFFF, 0x26FFFFFF, dp(14), 1f));
             LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f);
             lp.setMargins(dp(3), 0, dp(3), 0);
-            btn.setLayoutParams(lp);
             btn.setOnFocusChangeListener(this);
             btn.setOnClickListener(this);
             btn.setOnKeyListener(this);
-            controlsRow.addView(btn);
+            controlsRow.addView(btn, lp);
             if (i == 1) playPauseBtn = btn;
         }
         rootView.addView(headerRow, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
@@ -345,9 +345,8 @@ class MusicPill implements View.OnClickListener, View.OnFocusChangeListener, Vie
     }
 
     @Override public void onClick(View v) {
-        Object tag = v.getTag();
-        if (!(tag instanceof Integer)) return;
-        int id = (Integer) tag;
+        if (!(v.getTag() instanceof Integer)) return;
+        int id = (Integer) v.getTag();
         if (id == -1) { if (state == State.COMPACT) expand(); else if (state == State.EXPANDED) collapse(); }
         else if (id == 0) previousTrack();
         else if (id == 1) playPause();
@@ -357,8 +356,9 @@ class MusicPill implements View.OnClickListener, View.OnFocusChangeListener, Vie
     }
 
     @Override public void onFocusChange(View v, boolean hasFocus) {
-        v.setBackground(btnBg(hasFocus));
-        v.animate().scaleX(hasFocus ? 1.06f : 1f).scaleY(hasFocus ? 1.06f : 1f).setDuration(120).start();
+        v.setBackground(pillBox(hasFocus ? ACCENT_COLOR : 0x18FFFFFF, hasFocus ? Color.WHITE : 0x26FFFFFF, dp(14), hasFocus ? 1.5f : 1f));
+        float s = hasFocus ? 1.06f : 1f;
+        v.animate().scaleX(s).scaleY(s).setDuration(120).start();
     }
 
     @Override public boolean onKey(View v, int keyCode, KeyEvent event) {
@@ -375,11 +375,11 @@ class MusicPill implements View.OnClickListener, View.OnFocusChangeListener, Vie
         return false;
     }
 
-    private GradientDrawable btnBg(boolean focused) {
+    private GradientDrawable pillBox(int fill, int stroke, int radiusPx, float strokeDp) {
         GradientDrawable gd = new GradientDrawable();
-        gd.setCornerRadius(dp(14));
-        gd.setColor(focused ? ACCENT_COLOR : 0x18FFFFFF);
-        gd.setStroke(Math.max(1, Math.round((focused ? 1.5f : 1f) * density)), focused ? Color.WHITE : 0x26FFFFFF);
+        gd.setCornerRadius(radiusPx);
+        gd.setColor(fill);
+        gd.setStroke(Math.max(1, Math.round(strokeDp * density)), stroke);
         return gd;
     }
 
@@ -396,7 +396,7 @@ class MusicPill implements View.OnClickListener, View.OnFocusChangeListener, Vie
     }
 
     private void bindMetadata() {
-        if (titleView == null || subtitleView == null || timeView == null) return;
+        if (titleView == null) return;
         String[] lines = formatDisplayLines(nowPlaying);
         titleView.setText(lines[0]);
         subtitleView.setText(lines[1]);
@@ -415,7 +415,7 @@ class MusicPill implements View.OnClickListener, View.OnFocusChangeListener, Vie
 
     private void applyLayoutParams() {
         if (rootView == null) return;
-        if (attachedToWindowManager && windowManager != null) {
+        if (attachedToWm && windowManager != null) {
             try { windowManager.updateViewLayout(rootView, buildParams(true)); } catch (RuntimeException ignored) {}
         } else if (attachedToFallback && fallbackRoot != null) {
             rootView.setLayoutParams(buildParams(false));

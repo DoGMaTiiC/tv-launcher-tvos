@@ -11,9 +11,16 @@ import android.content.res.Resources;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.Color;
+import android.graphics.ColorFilter;
+import android.graphics.LinearGradient;
 import android.graphics.Outline;
+import android.graphics.Paint;
+import android.graphics.Path;
 import android.graphics.PixelFormat;
 import android.graphics.Rect;
+import android.graphics.RectF;
+import android.graphics.Shader;
+import android.graphics.Typeface;
 import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
@@ -80,12 +87,18 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
         int ambient;
         /** uniform_tiles card fill, top and bottom colour; null until sampled from the icon. */
         int[] backdrop;
+        /** True for virtual tvOS showcase entries when fewer than 24 apps are installed. */
+        final boolean virtual;
 
         Entry(String label, ComponentName component, Drawable banner, Drawable icon) {
-            this(APP, label, component, banner, icon, null, 0);
+            this(APP, label, component, banner, icon, null, 0, false);
         }
 
         Entry(int kind, String label, ComponentName component, Drawable banner, Drawable icon, String caption, int accent) {
+            this(kind, label, component, banner, icon, caption, accent, false);
+        }
+
+        Entry(int kind, String label, ComponentName component, Drawable banner, Drawable icon, String caption, int accent, boolean virtual) {
             this.kind = kind;
             this.label = label;
             this.component = component;
@@ -94,12 +107,27 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
             this.icon = icon;
             this.name = caption == null ? label : label + " \u00B7 " + caption;
             this.ambient = accent;
+            this.virtual = virtual;
         }
     }
 
     static final float FOCUS_SCALE = 1.10f;
+    /** HeadBoardIconRendering: restingSize 250x150pt (5:3), focusedSize 306x184pt, focusScale 1.2267f. */
+    static final float TVOS_W_DP = 125f, TVOS_H_DP = 75f, TVOS_FOCUS_SCALE = 1.2267f;
     /** Design size of a tile (dp); tiles shrink from here when the columns don't fit, see tileWidthPx. */
     static final float DESIGN_W_DP = 180f, DESIGN_H_DP = 101f;
+
+    static int tvosTileWidthPx(int innerWidthPx, int columns, float density) {
+        int target = Math.round(TVOS_W_DP * density);
+        if (innerWidthPx <= 0 || columns <= 0) return target;
+        int cell = innerWidthPx / columns;
+        int maxFit = Math.round(cell - 8f * density);
+        return Math.max(Math.round(80f * density), Math.min(target, maxFit));
+    }
+
+    static int tvosTileHeightPx(int tileWidthPx) {
+        return Math.round(tileWidthPx * TVOS_H_DP / TVOS_W_DP);
+    }
 
     /**
      * Tile width for a grid of this inner width: the cell minus room for the focus zoom and the glass
@@ -190,6 +218,8 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
     private final float restNameAlpha;
     private final float gridRestNameAlpha;
     private final boolean tileTilt;
+    private final boolean dockBlur;
+    private final boolean topStage;
     /** cinematic_home: only then does a launch record the last-opened app the shelf uses. */
     private final boolean cinematic;
     /** Dock order (config.xml dock_apps, or a theme's config.json). */
@@ -235,6 +265,8 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
         this.animations = cfg.animations;
         this.advancedEffects = cfg.animations && cfg.advancedEffects;
         this.tileTilt = cfg.animations && cfg.tileTilt;
+        this.dockBlur = cfg.dockBlur;
+        this.topStage = cfg.heroArt && cfg.dockBlur;
         this.showHomeSettings = cfg.showHomeSettingsShortcut;
         this.showLibrary = LibraryApps.showPill(cfg.appLibrary, cfg.libraryButton, cfg.showLibraryPill);
         this.reducedMotion = cfg.reducedMotion;
@@ -244,7 +276,7 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
         this.dockRow = cfg.dockRow;
         this.singleRow = cfg.singleRow;
         this.restNameAlpha = cfg.alwaysShowNames ? 0.75f : 0f;
-        this.gridRestNameAlpha = cfg.alwaysShowNames ? 0.75f : (this.tileTilt ? 0.65f : 0f);
+        this.gridRestNameAlpha = cfg.alwaysShowNames ? 0.75f : ((this.dockBlur || this.topStage) ? 0f : (this.tileTilt ? 0.65f : 0f));
         this.cinematic = cfg.cinematicHome;
         this.launchActions = cfg.launchActions;
         this.iconTiles = new HashSet<>(Arrays.asList(ctx.getResources().getStringArray(R.array.icon_tiles)));
@@ -331,18 +363,54 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
             return a.label.compareToIgnoreCase(b.label);
         });
         // Retain the optional Default-home tile until dependent tile-ordering work is merged.
-        if (showHomeSettings
+        if (showHomeSettings && !topStage
                 && pm.resolveActivity(new Intent(Settings.ACTION_HOME_SETTINGS), 0) != null) {
             fresh.add(new Entry(Entry.HOME_SETTINGS, ctx.getString(R.string.home_settings),
                     new ComponentName(ctx, HomeSettingsActivity.class), null,
                     ctx.getDrawable(R.drawable.ic_home_settings), null, 0));
         }
-        docked = 0;
-        while (docked < fresh.size() && isDocked(fresh.get(docked))) docked++;
-        emptySlots = dockRow && !reordering ? DockSlots.empty(docked, dockSize, fresh.size(), fillDock) : 0;
-        for (int i = 0; i < emptySlots; i++) {
-            fresh.add(docked + i, new Entry(Entry.EMPTY, "", new ComponentName(ctx, "empty-dock-slot-" + i),
-                    null, null, null, 0));
+        if (topStage && fresh.size() < SPEC_LABELS.length) {
+            Map<String, Entry> realByPkg = new HashMap<>();
+            for (Entry entry : fresh) {
+                if (!realByPkg.containsKey(entry.pkg)) realByPkg.put(entry.pkg, entry);
+            }
+            List<Entry> showcase = new ArrayList<>(SPEC_LABELS.length);
+            for (int i = 0; i < SPEC_LABELS.length; i++) {
+                String sp = SPEC_PKGS[i];
+                int bar = sp.indexOf('|');
+                String pkg = bar < 0 ? sp : sp.substring(0, bar);
+                Entry real = realByPkg.remove(pkg);
+                if (real == null && bar >= 0) real = realByPkg.remove(sp.substring(bar + 1));
+                Drawable brandBanner = new BrandTileDrawable(i);
+                if (real != null) {
+                    showcase.add(new Entry(real.kind, SPEC_LABELS[i], real.component, brandBanner, null, null, SPEC_ACCENTS[i], false));
+                } else {
+                    showcase.add(new Entry(Entry.APP, SPEC_LABELS[i],
+                            new ComponentName(pkg, pkg + ".ShowcaseActivity"),
+                            brandBanner, null, null, SPEC_ACCENTS[i], true));
+                }
+            }
+            fresh = showcase;
+            docked = Math.min(dockSize, fresh.size());
+            emptySlots = 0;
+        } else {
+            if (topStage) {
+                for (int i = 0; i < fresh.size(); i++) {
+                    Entry e = fresh.get(i);
+                    int idx = showcaseIndexForPkg(e.pkg);
+                    if (idx >= 0) {
+                        fresh.set(i, new Entry(e.kind, e.label, e.component,
+                                new BrandTileDrawable(idx), null, null, SPEC_ACCENTS[idx], false));
+                    }
+                }
+            }
+            docked = 0;
+            while (docked < fresh.size() && isDocked(fresh.get(docked))) docked++;
+            emptySlots = dockRow && !reordering ? DockSlots.empty(docked, dockSize, fresh.size(), fillDock) : 0;
+            for (int i = 0; i < emptySlots; i++) {
+                fresh.add(docked + i, new Entry(Entry.EMPTY, "", new ComponentName(ctx, "empty-dock-slot-" + i),
+                        null, null, null, 0));
+            }
         }
         items.clear();
         items.addAll(fresh);
@@ -419,7 +487,10 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
         float density = parent.getResources().getDisplayMetrics().density;
         int width = parent.getWidth() > 0 ? parent.getWidth() : parent.getMeasuredWidth();
         int inner = width - parent.getPaddingLeft() - parent.getPaddingRight();
-        int w = tileWidthPx(inner, parent.getHeight(), dockSize, rowsBelowDock, dockTitle, dockRow, density), h = tileHeightPx(w);
+        int w = topStage
+                ? tvosTileWidthPx(inner, dockSize, density)
+                : tileWidthPx(inner, parent.getHeight(), dockSize, rowsBelowDock, dockTitle, dockRow, density);
+        int h = topStage ? tvosTileHeightPx(w) : tileHeightPx(w);
         View card = v.findViewById(R.id.card);
         ViewGroup.LayoutParams cardLp = card.getLayoutParams();
         cardLp.width = w;
@@ -428,8 +499,11 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
         View name = v.findViewById(R.id.name);
         ViewGroup.MarginLayoutParams nameLp = (ViewGroup.MarginLayoutParams) name.getLayoutParams();
         nameLp.width = w;
-        nameLp.topMargin = h + Math.round((dockRow ? 7 : 4) * density);
-        if (!dockRow) {
+        nameLp.topMargin = h + Math.round((topStage ? 12 : (dockRow ? 7 : 4)) * density);
+        if (topStage) {
+            nameLp.height = Math.round(20 * density);
+            v.setPadding(v.getPaddingLeft(), Math.round(6 * density), v.getPaddingRight(), Math.round(2 * density));
+        } else if (!dockRow) {
             // Compact spacing (COMPACT_ITEM_EXTRA_DP): 4dp item padding and a 20dp name instead of 8dp and 22dp.
             nameLp.height = Math.round(20 * density);
             int pad = Math.round(4 * density);
@@ -456,9 +530,13 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
             View label = v.findViewById(R.id.label);
             label.setPadding(label.getPaddingLeft(), label.getPaddingTop(), label.getPaddingRight(), Math.round(4f * density));
         }
-        Holder holder = new Holder(v, listener, animations, advancedEffects, tileTilt, reducedMotion, restNameAlpha, focusOvershoot);
+        Holder holder = new Holder(v, listener, animations, advancedEffects, tileTilt, dockBlur, topStage, reducedMotion, restNameAlpha, focusOvershoot);
         if (tileTilt) {
             holder.card.setCameraDistance(TileTilt.cameraDistancePx(ctx.getResources().getDisplayMetrics().density));
+        }
+        if (dockBlur && android.os.Build.VERSION.SDK_INT >= 28) {
+            holder.card.setOutlineSpotShadowColor(0xE0000000);
+            holder.card.setOutlineAmbientShadowColor(0x88000000);
         }
         return holder;
     }
@@ -487,15 +565,16 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
         // In a single row every tile is the dock's kind: the big title above names it.
         boolean dockKind = DockSlots.inDockRow(dockRow, singleRow, position, dockSize);
         float tileRestAlpha = dockKind ? restNameAlpha : gridRestNameAlpha;
-        h.name.setVisibility(dockKind && tileRestAlpha == 0f ? View.INVISIBLE : View.VISIBLE);
+        h.name.setVisibility(dockKind && (tileRestAlpha == 0f || dockBlur || topStage) ? View.GONE : View.VISIBLE);
         h.inDock = dockKind;
         h.currentRestNameAlpha = tileRestAlpha;
         boolean focused = h.card.isFocused();   // a rebind after reload() can hit the focused tile
-        h.name.setAlpha(focused ? 1f : tileRestAlpha);
+        h.name.setAlpha(dockKind ? 0f : (focused ? 1f : tileRestAlpha));
         h.card.setScaleX(focused && animations ? focusScale() : 1f);
         h.card.setScaleY(focused && animations ? focusScale() : 1f);
         h.card.setTranslationY(focused && advancedEffects && !dockKind ? -4f * ctx.getResources().getDisplayMetrics().density : 0f);
-        h.card.setTranslationZ(focused && advancedEffects ? 8f * ctx.getResources().getDisplayMetrics().density : 0f);
+        h.card.setTranslationZ(focused && (advancedEffects || dockBlur) ? (dockBlur ? 24f : 8f) * ctx.getResources().getDisplayMetrics().density : 0f);
+        h.updateFocusForeground(focused);
         if (!focused) {
             h.card.setRotationX(0f);
             h.card.setRotationY(0f);
@@ -506,7 +585,10 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
         // A fully opaque banner covers the whole card (centerCrop), so the card's own fill under it is drawn for
         // nothing on every frame; keep it under banners with transparent parts and under icon tiles.
         h.card.setBackground(e.banner != null && e.banner.getOpacity() == PixelFormat.OPAQUE ? null : h.cardBackground);
-        if (tileTilt && (uniformTiles || e.banner == null)) {
+        if (dockBlur && e.banner == null) {
+            h.card.setBackground(brandCard(e.pkg, e.icon, ambientColorAt(position),
+                    cornerRadius(h.card.getLayoutParams().width, ctx.getResources().getDisplayMetrics().density, topStage || dockBlur)));
+        } else if (tileTilt && (uniformTiles || e.banner == null)) {
             h.card.setBackground(smokedGlassCard(ctx.getResources().getDisplayMetrics().density, ambientColorAt(position)));
         } else if (uniformTiles && e.banner == null) {
             if (e.backdrop == null) e.backdrop = backdrop(e.icon, ambientColorAt(position));
@@ -549,6 +631,27 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
         if (e.kind == Entry.HOME_SETTINGS) {
             ctx.startActivity(new Intent(ctx, HomeSettingsActivity.class)
                     .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+            return;
+        }
+        if (e.virtual) {
+            PackageManager pm = ctx.getPackageManager();
+            Intent fallback = pm.getLeanbackLaunchIntentForPackage(e.pkg);
+            if (fallback == null) fallback = pm.getLaunchIntentForPackage(e.pkg);
+            if (fallback == null) {
+                boolean utility = "tv.homekit".equals(e.pkg) || "tv.search".equals(e.pkg)
+                        || "tv.computers".equals(e.pkg) || "tv.photos".equals(e.pkg) || "tv.facetime".equals(e.pkg);
+                if (!utility) {
+                    fallback = pm.getLeanbackLaunchIntentForPackage("com.google.android.youtube.tv");
+                    if (fallback == null) fallback = pm.getLaunchIntentForPackage("com.google.android.youtube.tv");
+                }
+                if (fallback == null) fallback = new Intent(Settings.ACTION_SETTINGS);
+            }
+            fallback.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            try {
+                ctx.startActivity(fallback);
+            } catch (Exception ex) {
+                Toast.makeText(ctx, ctx.getString(R.string.cant_open, e.label), Toast.LENGTH_SHORT).show();
+            }
             return;
         }
         Intent i = new Intent(Intent.ACTION_MAIN)
@@ -694,7 +797,32 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
     }
 
     float focusScale() {
-        return !animations ? 1f : tileTilt ? TileTilt.FOCUS_SCALE : advancedEffects ? 1.12f : 1.10f;
+        return !animations ? 1f : (topStage || dockBlur) ? TVOS_FOCUS_SCALE : tileTilt ? TileTilt.FOCUS_SCALE : advancedEffects ? 1.12f : 1.10f;
+    }
+
+    private static final String[] BRAND_KEYS = {
+            "netflix", "youtube", "prime", "amazon", "disney", "max", "hbo", "globo", "vending", "settings", "tvhome"
+    };
+    private static final int[] BRAND_COLS = {
+            0xFF14080A, 0xFF000000, 0xFF1C1C1E, 0xFF09090A, 0xFF2AA8FF, 0xFF0A68D4, 0xFF2AA8FF, 0xFF0A68D4,
+            0xFF173584, 0xFF08143F, 0xFF5C30E8, 0xFF221684, 0xFF5C30E8, 0xFF221684, 0xFFFF8A1F, 0xFFFF2D5A,
+            0xFF1A3A5C, 0xFF0D1D33, 0xFF3A3A3E, 0xFF1C1C1E, 0xFF1F3B68, 0xFF0E1D36
+    };
+
+    /** Borderless Apple TV / free-my-tv brand card fill with no wireframe stroke. */
+    private static GradientDrawable brandCard(String pkg, Drawable icon, int accent, float cornerPx) {
+        String p = pkg == null ? "" : pkg.toLowerCase(java.util.Locale.ROOT);
+        int[] cols = null;
+        for (int i = 0; i < BRAND_KEYS.length; i++) {
+            if (p.contains(BRAND_KEYS[i])) {
+                cols = new int[]{BRAND_COLS[i * 2], BRAND_COLS[i * 2 + 1]};
+                break;
+            }
+        }
+        if (cols == null) cols = backdrop(icon, accent);
+        GradientDrawable d = new GradientDrawable(GradientDrawable.Orientation.TOP_BOTTOM, cols);
+        d.setCornerRadius(cornerPx);
+        return d;
     }
 
     private static GradientDrawable smokedGlassCard(float density, int accent) {
@@ -926,6 +1054,12 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
         return 16f * density * Math.min(1f, tileWidthPx / (DESIGN_W_DP * density));
     }
 
+    static float cornerRadius(int tileWidthPx, float density, boolean tvos) {
+        return tvos
+                ? 18f * density * Math.min(1f, tileWidthPx / (TVOS_W_DP * density))
+                : cornerRadius(tileWidthPx, density);
+    }
+
     static final class Holder extends RecyclerView.ViewHolder {
         final View card;
         /** item_app.xml's tile_bg: the dark card behind an icon tile, or behind a banner that has transparent parts. */
@@ -937,6 +1071,8 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
         final boolean animations;
         final boolean advancedEffects;
         final boolean tileTilt;
+        final boolean dockBlur;
+        final boolean topStage;
         final boolean reducedMotion;
         /** Alpha of the name while the tile is not focused (always_show_names or tile_tilt grid). */
         final float restNameAlpha;
@@ -944,9 +1080,10 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
         final boolean overshoot;
         /** A dock tile: it grows in place without advanced_effects' lift, which reads as off-centre in the band (#2135). */
         boolean inDock;
+        private GradientDrawable focusRim;
 
         Holder(View v, TileListener listener, boolean animations, boolean advancedEffects, boolean tileTilt,
-               boolean reducedMotion, float restNameAlpha, boolean overshoot) {
+               boolean dockBlur, boolean topStage, boolean reducedMotion, float restNameAlpha, boolean overshoot) {
             super(v);
             card = v.findViewById(R.id.card);
             cardBackground = card.getBackground();
@@ -957,6 +1094,8 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
             this.animations = animations;
             this.advancedEffects = advancedEffects;
             this.tileTilt = tileTilt;
+            this.dockBlur = dockBlur;
+            this.topStage = topStage;
             this.reducedMotion = reducedMotion;
             this.restNameAlpha = restNameAlpha;
             this.currentRestNameAlpha = restNameAlpha;
@@ -966,8 +1105,8 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
             card.setOutlineProvider(new ViewOutlineProvider() {
                 @Override
                 public void getOutline(View view, Outline outline) {
-                    // 16dp at the design width, scaled down with the tile so small tiles keep the same shape.
-                    outline.setRoundRect(0, 0, view.getWidth(), view.getHeight(), cornerRadius(view.getWidth(), density));
+                    outline.setRoundRect(0, 0, view.getWidth(), view.getHeight(),
+                            cornerRadius(view.getWidth(), density, topStage || dockBlur));
                 }
             });
             card.setClipToOutline(true);
@@ -984,8 +1123,12 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
                 view.animate().cancel();
                 banner.animate().cancel();
                 name.animate().cancel();
-                float scale = !animations ? 1f : tileTilt ? TileTilt.FOCUS_SCALE : advancedEffects ? 1.12f : 1.10f;
+                float scale = !animations ? 1f : (topStage || dockBlur) ? TVOS_FOCUS_SCALE : tileTilt ? TileTilt.FOCUS_SCALE : advancedEffects ? 1.12f : 1.10f;
                 float s = focused ? scale : 1f;
+                float zPx = focused && (advancedEffects || dockBlur) ? (dockBlur ? 24f : 8f) * density : 0f;
+                updateFocusForeground(focused);
+                float nameTargetAlpha = inDock ? 0f : (focused ? 1f : currentRestNameAlpha);
+                float nameFocusedTy = (topStage || dockBlur) ? 2f * density : 4f * density;
                 if (!animations) {
                     view.setScaleX(1f);
                     view.setScaleY(1f);
@@ -995,14 +1138,14 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
                     view.setRotationY(0f);
                     banner.setScaleX(1f);
                     banner.setScaleY(1f);
-                    name.setAlpha(focused ? 1f : currentRestNameAlpha);
+                    name.setAlpha(nameTargetAlpha);
                     name.setTranslationY(0f);
                 } else if (reducedMotion) {
                     // A short zoom with no hardware layer: building a layer for so short an animation costs more
                     // frames than it saves. The name just appears instead of fading.
                     view.animate().scaleX(s).scaleY(s)
                             .translationY(focused && advancedEffects && !inDock ? -4f * density : 0f)
-                            .translationZ(focused && advancedEffects ? 8f * density : 0f)
+                            .translationZ(zPx)
                             .setDuration(focused ? Motion.REDUCED_MS : 60)
                             .setInterpolator(new DecelerateInterpolator())
                             .start();
@@ -1014,15 +1157,12 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
                         banner.setScaleX(focused ? TileTilt.BANNER_PARALLAX_SCALE : 1f);
                         banner.setScaleY(focused ? TileTilt.BANNER_PARALLAX_SCALE : 1f);
                     }
-                    name.setAlpha(focused ? 1f : currentRestNameAlpha);
-                    // Same place as the full motion's slide ends: the layout's -6dp is only its starting point, and
-                    // left there the name overlaps the zoomed tile.
-                    // Only on focus: snapping it back to -6dp while it fades out would jump it up over the tile.
-                    if (focused) name.setTranslationY(density * 4f);
+                    name.setAlpha(nameTargetAlpha);
+                    if (focused) name.setTranslationY(nameFocusedTy);
                 } else {
                     view.animate().scaleX(s).scaleY(s)
                             .translationY(focused && advancedEffects && !inDock ? -4f * density : 0f)
-                            .translationZ(focused && advancedEffects ? 8f * density : 0f)
+                            .translationZ(zPx)
                             .setDuration(advancedEffects ? (focused ? 220 : 170) : (focused ? 260 : 180))
                             .setInterpolator(focused && !overshoot ? new DecelerateInterpolator(1.5f)
                                     : new OvershootInterpolator(focused ? (advancedEffects ? 0.7f : 1.6f) : 0f))
@@ -1036,9 +1176,12 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
                                 .scaleY(focused ? TileTilt.BANNER_PARALLAX_SCALE : 1f)
                                 .setDuration(280).start();
                     }
-                    name.animate().alpha(focused ? 1f : currentRestNameAlpha)
-                            .translationY(focused ? density * 4f : -density * 6f)
-                            .setDuration(220).start();
+                    name.animate().alpha(nameTargetAlpha)
+                            .translationY(focused ? nameFocusedTy : -density * 4f)
+                            .setDuration(200).start();
+                }
+                if (dockBlur && view.getParent() instanceof View && view.getParent().getParent() instanceof View) {
+                    ((View) view.getParent().getParent()).invalidate();
                 }
                 int pos = getBindingAdapterPosition();
                 if (focused && listener != null && pos != RecyclerView.NO_POSITION) {
@@ -1046,5 +1189,361 @@ public class AppAdapter extends RecyclerView.Adapter<RecyclerView.ViewHolder> {
                 }
             });
         }
+
+        void updateFocusForeground(boolean focused) {
+            if (!dockBlur && !topStage) return;
+            if (!focused) {
+                card.setForeground(null);
+                return;
+            }
+            if (focusRim == null) {
+                float density = card.getResources().getDisplayMetrics().density;
+                int w = card.getLayoutParams() != null && card.getLayoutParams().width > 0
+                        ? card.getLayoutParams().width : Math.round(TVOS_W_DP * density);
+                focusRim = new GradientDrawable();
+                focusRim.setColor(Color.TRANSPARENT);
+                focusRim.setCornerRadius(cornerRadius(w, density, true));
+                focusRim.setStroke(Math.max(1, Math.round(1.5f * density)), 0x66FFFFFF);
+            }
+            card.setForeground(focusRim);
+        }
+    }
+
+    // ---- 24-slot tvOS 27.2 Showcase Grid + Vector 5:3 Brand Tiles --------------------------------
+
+    private static final String[] SPEC_LABELS = {
+            "Apple TV", "YouTube", "Music", "Paramount+", "Netflix", "Disney+",
+            "Sing", "Settings", "Podcasts", "Arcade", "UFC", "Games",
+            "FaceTime", "Hulu", "Prime Video", "ABC", "YouTube TV", "Photos",
+            "App Store", "HomeKit", "Twitch", "Search", "Computers", "Spotify"
+    };
+    private static final String[] SPEC_PKGS = {
+            "tv.apple|com.apple.atve.androidtv.appletv", "com.google.android.youtube.tv",
+            "com.apple.tvmusic|com.apple.android.music", "com.cbs.ott|com.cbs.app",
+            "com.netflix.ninja", "com.disney.disneyplus",
+            "tv.sing", "com.android.tv.settings|com.android.settings",
+            "tv.podcasts", "tv.invaders", "tv.ufc", "tv.games|com.google.android.play.games",
+            "tv.facetime", "com.hulu.livingroomplus", "com.amazon.amazonvideo.livingroom",
+            "tv.abc", "com.google.android.youtube.tvunplugged", "tv.photos",
+            "com.android.vending", "tv.homekit", "tv.twitch.android.app|com.twitch.android.app",
+            "tv.search", "tv.computers", "com.spotify.tv.android"
+    };
+    private static final int[] SPEC_ACCENTS = {
+            0xFF3A82F6, 0xFFFF0000, 0xFFFC3C44, 0xFF0064FF, 0xFFE50914, 0xFF0A8C96,
+            0xFFD0D4DC, 0xFF9898A0, 0xFFA550E5, 0xFF5E5CE6, 0xFFD20A0A, 0xFFFF2D55,
+            0xFF30D158, 0xFF1CE783, 0xFF00A8E1, 0xFFE01A22, 0xFFFF0000, 0xFFFF9F0A,
+            0xFF1D8FF2, 0xFF78909C, 0xFF9146FF, 0xFF9898A0, 0xFFD8DCE4, 0xFF1ED760
+    };
+
+    private static int showcaseIndexForPkg(String pkg) {
+        if (pkg == null) return -1;
+        for (int i = 0; i < SPEC_PKGS.length; i++) {
+            String sp = SPEC_PKGS[i];
+            int bar = sp.indexOf('|');
+            if (bar < 0 ? pkg.equals(sp) : (pkg.equals(sp.substring(0, bar)) || pkg.equals(sp.substring(bar + 1)))) {
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    /** Crisp 5:3 vector tvOS brand tile renderer (no bitmap memory overhead). */
+    private static final class BrandTileDrawable extends Drawable {
+        private static final Typeface SANS_BOLD = Typeface.create(Typeface.DEFAULT, Typeface.BOLD);
+        private static final Typeface SANS_BOLD_ITALIC = Typeface.create(Typeface.DEFAULT, Typeface.BOLD_ITALIC);
+        private static final Typeface CONDENSED_BOLD = Typeface.create("sans-serif-condensed", Typeface.BOLD);
+        private static final int[] BG_TOP = {
+                0xFF1C1C1F, 0xFFFFFFFF, 0xFF1C1C1F, 0xFF006AFF, 0xFFFFFFFF, 0xFF041C2E,
+                0xFF1C1C1F, 0xFF949499, 0xFFB25AF0, 0xFF343438, 0xFFE20A0A, 0xFFFF2D55,
+                0xFF34D95E, 0xFF0B0C0F, 0xFF00B4EE, 0xFF13151C, 0xFF26272B, 0xFFFFFFFF,
+                0xFF2496FF, 0xFF68686E, 0xFF984FFF, 0xFF98989E, 0xFFFAFAFC, 0xFF161618
+        };
+        private static final int[] BG_BOT = {
+                0xFF08080A, 0xFFF2F2F6, 0xFF08080A, 0xFF0038A8, 0xFFF2F2F6, 0xFF0B747C,
+                0xFF08080A, 0xFF5D5D62, 0xFF6616A6, 0xFF202024, 0xFFA20505, 0xFFC6001A,
+                0xFF1E9638, 0xFF040507, 0xFF0078BC, 0xFF07080B, 0xFF16171A, 0xFFF2F2F6,
+                0xFF0052CE, 0xFF444448, 0xFF7024E4, 0xFF64646A, 0xFFE6E6EC, 0xFF070709
+        };
+        private static final int[] PHOTO_PETALS = {
+                0xFFFF3B30, 0xFFFF9500, 0xFFFFCC00, 0xFF34C759, 0xFF00C7BE, 0xFF007AFF, 0xFF5856D6, 0xFFAF52DE
+        };
+        private static final short[] ARCADE_ROWS = {
+                0b00100000100, 0b00010001000, 0b00111111100, 0b01101110110,
+                0b11111111111, 0b10111111101, 0b10100000101, 0b00011011000
+        };
+
+        private final int brand;
+        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint textPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Path path = new Path();
+        private final RectF rf = new RectF();
+        private int cachedW = -1, cachedH = -1;
+        private Shader bgShader;
+
+        BrandTileDrawable(int brand) {
+            this.brand = brand;
+        }
+
+        private void txt(Canvas c, String t, float x, float y, float sz, int col, Typeface tf, boolean left) {
+            textPaint.setTypeface(tf);
+            textPaint.setColor(col);
+            textPaint.setTextSize(sz);
+            textPaint.setTextAlign(left ? Paint.Align.LEFT : Paint.Align.CENTER);
+            c.drawText(t, x, y, textPaint);
+        }
+
+        private void rr(Canvas c, float l, float t, float r, float b, float rad, int col) {
+            paint.setStyle(Paint.Style.FILL);
+            paint.setColor(col);
+            rf.set(l, t, r, b);
+            c.drawRoundRect(rf, rad, rad, paint);
+        }
+
+        private void poly(Canvas c, float cx, float cy, float s, int col, float... xy) {
+            paint.setStyle(Paint.Style.FILL);
+            paint.setColor(col);
+            path.reset();
+            path.moveTo(cx + xy[0] * s, cy + xy[1] * s);
+            for (int i = 2; i < xy.length; i += 2) path.lineTo(cx + xy[i] * s, cy + xy[i + 1] * s);
+            path.close();
+            c.drawPath(path, paint);
+        }
+
+        private void arc(Canvas c, float cx, float cy, float s, float l, float t, float r, float b,
+                         float st, float sw, float w, int col) {
+            paint.setStyle(Paint.Style.STROKE);
+            paint.setStrokeWidth(w * s);
+            paint.setColor(col);
+            rf.set(cx + l * s, cy + t * s, cx + r * s, cy + b * s);
+            c.drawArc(rf, st, sw, false, paint);
+        }
+
+        private void playBadge(Canvas c, float cx, float cy, float s, float l, float r, float rad, float tx, float tip) {
+            rr(c, cx + l * s, cy - 16f * s, cx + r * s, cy + 16f * s, rad * s, 0xFFFF0000);
+            poly(c, cx, cy, s, Color.WHITE, tx, -7f, tx, 7f, tip, 0f);
+        }
+
+        @Override
+        public void draw(@NonNull Canvas c) {
+            Rect b = getBounds();
+            float w = b.width(), h = b.height();
+            if (w <= 0 || h <= 0) return;
+            float s = w / 250f, cx = b.left + w * 0.5f, cy = b.top + h * 0.5f;
+            if (cachedW != (int) w || cachedH != (int) h || bgShader == null) {
+                cachedW = (int) w;
+                cachedH = (int) h;
+                bgShader = brand == 5
+                        ? new LinearGradient(b.left, b.top, b.right, b.bottom,
+                                new int[]{0xFF041C2E, 0xFF084B5A, 0xFF0B747C}, new float[]{0f, 0.55f, 1f}, Shader.TileMode.CLAMP)
+                        : new LinearGradient(0, b.top, 0, b.bottom, BG_TOP[brand], BG_BOT[brand], Shader.TileMode.CLAMP);
+            }
+            paint.reset();
+            paint.setAntiAlias(true);
+            paint.setShader(bgShader);
+            c.drawRect(b, paint);
+            paint.setShader(null);
+            textPaint.reset();
+            textPaint.setAntiAlias(true);
+
+            switch (brand) {
+                case 0:
+                    drawAppleGlyph(c, cx - 22f * s, cy + 2f * s, 14f * s, Color.WHITE, 0xFF141416);
+                    txt(c, "tv", cx - 4f * s, cy + 13f * s, 38f * s, Color.WHITE, SANS_BOLD, true);
+                    break;
+                case 1:
+                    playBadge(c, cx, cy, s, -82f, -36f, 9f, -64f, -51f);
+                    txt(c, "YouTube", cx - 30f * s, cy + 10.5f * s, 31f * s, 0xFF141414, CONDENSED_BOLD, true);
+                    break;
+                case 2:
+                    paint.setColor(Color.WHITE);
+                    c.drawOval(cx - 32f * s, cy + 12f * s, cx - 10f * s, cy + 30f * s, paint);
+                    c.drawOval(cx + 6f * s, cy + 6f * s, cx + 28f * s, cy + 24f * s, paint);
+                    c.drawRect(cx - 15f * s, cy - 26f * s, cx - 10f * s, cy + 21f * s, paint);
+                    c.drawRect(cx + 23f * s, cy - 32f * s, cx + 28f * s, cy + 15f * s, paint);
+                    poly(c, cx, cy, s, Color.WHITE, -15f, -26f, 28f, -34f, 28f, -22f, -15f, -14f);
+                    break;
+                case 3:
+                    poly(c, cx, cy, s, Color.WHITE, -32f, 10f, 0f, -26f, 32f, 10f);
+                    poly(c, cx, cy, s, 0xFF0052D6, -14f, 10f, 3f, -8f, 17f, 10f);
+                    paint.setColor(Color.WHITE);
+                    for (int i = 0; i < 11; i++) {
+                        double ang = Math.toRadians(-195 + i * 21);
+                        c.drawCircle(cx + (float) Math.cos(ang) * 34f * s, cy - 4f * s + (float) Math.sin(ang) * 30f * s, 2.2f * s, paint);
+                    }
+                    txt(c, "Paramount+", cx, cy + 36f * s, 22f * s, Color.WHITE, SANS_BOLD_ITALIC, false);
+                    break;
+                case 4:
+                    textPaint.setLetterSpacing(0.04f);
+                    txt(c, "NETFLIX", cx, cy + 14f * s, 42f * s, 0xFFE50914, CONDENSED_BOLD, false);
+                    break;
+                case 5:
+                    arc(c, cx, cy, s, -48f, -34f, 48f, 18f, 195f, 150f, 2.4f, 0x885CE1E6);
+                    paint.setStyle(Paint.Style.FILL);
+                    paint.setColor(Color.WHITE);
+                    c.drawCircle(cx + 39f * s, cy - 22f * s, 2.5f * s, paint);
+                    txt(c, "Disney+", cx, cy + 15f * s, 34f * s, Color.WHITE, SANS_BOLD_ITALIC, false);
+                    break;
+                case 6:
+                    paint.setColor(Color.WHITE);
+                    c.drawCircle(cx - 24f * s, cy - 10f * s, 3f * s, paint);
+                    c.drawCircle(cx + 26f * s, cy + 12f * s, 3.2f * s, paint);
+                    c.drawCircle(cx + 24f * s, cy - 22f * s, 2.2f * s, paint);
+                    c.save();
+                    c.rotate(42f, cx, cy);
+                    paint.setColor(0xFFE5E5EA);
+                    c.drawCircle(cx, cy - 20f * s, 14f * s, paint);
+                    paint.setColor(0xFF98989F);
+                    c.drawRect(cx - 14f * s, cy - 18f * s, cx + 14f * s, cy - 14f * s, paint);
+                    poly(c, cx, cy, s, 0xFFD1D1D6, -7f, -12f, 7f, -12f, 4.5f, 32f, -4.5f, 32f);
+                    c.restore();
+                    break;
+                case 7:
+                    paint.setStyle(Paint.Style.STROKE);
+                    paint.setColor(0xFFE5E5EA);
+                    paint.setStrokeWidth(7f * s);
+                    c.drawCircle(cx, cy, 34f * s, paint);
+                    paint.setStrokeWidth(3.5f * s);
+                    paint.setColor(0xCCFFFFFF);
+                    c.drawCircle(cx, cy, 20f * s, paint);
+                    for (int i = 0; i < 3; i++) {
+                        double a = Math.toRadians(-90 + i * 120);
+                        c.drawLine(cx, cy, cx + (float) Math.cos(a) * 32f * s, cy + (float) Math.sin(a) * 32f * s, paint);
+                    }
+                    paint.setStyle(Paint.Style.FILL);
+                    paint.setColor(0xFFF2F2F7);
+                    c.drawCircle(cx, cy, 8f * s, paint);
+                    break;
+                case 8:
+                    arc(c, cx, cy, s, -34f, -42f, 34f, 26f, 130f, 280f, 4.5f, 0xB8FFFFFF);
+                    arc(c, cx, cy, s, -21f, -29f, 21f, 13f, 135f, 270f, 4.5f, 0xB8FFFFFF);
+                    paint.setStyle(Paint.Style.FILL);
+                    paint.setColor(Color.WHITE);
+                    c.drawCircle(cx, cy - 8f * s, 9f * s, paint);
+                    rr(c, cx - 9f * s, cy + 4f * s, cx + 9f * s, cy + 34f * s, 8f * s, Color.WHITE);
+                    break;
+                case 9: {
+                    paint.setColor(Color.WHITE);
+                    float px = 6.5f * s, ox = cx - 5.5f * px, oy = cy - 4f * px;
+                    for (int r = 0; r < ARCADE_ROWS.length; r++) {
+                        for (int col = 0; col < 11; col++) {
+                            if ((ARCADE_ROWS[r] & (1 << (10 - col))) != 0) {
+                                c.drawRect(ox + col * px, oy + r * px, ox + (col + 1) * px, oy + (r + 1) * px, paint);
+                            }
+                        }
+                    }
+                    break;
+                }
+                case 10:
+                    txt(c, "UFC", cx, cy + 17f * s, 48f * s, Color.WHITE, SANS_BOLD_ITALIC, false);
+                    break;
+                case 11:
+                    rr(c, cx - 32f * s, cy + 4f * s, cx + 32f * s, cy + 30f * s, 10f * s, 0xFFFFD6DF);
+                    paint.setColor(Color.WHITE);
+                    c.drawRect(cx - 4f * s, cy - 22f * s, cx + 4f * s, cy + 10f * s, paint);
+                    c.drawCircle(cx, cy - 24f * s, 12f * s, paint);
+                    paint.setColor(0xFFFF2D55);
+                    c.drawCircle(cx + 18f * s, cy + 14f * s, 4f * s, paint);
+                    break;
+                case 12:
+                    rr(c, cx - 38f * s, cy - 20f * s, cx + 12f * s, cy + 20f * s, 8f * s, Color.WHITE);
+                    poly(c, cx, cy, s, Color.WHITE, 15f, -8f, 38f, -20f, 38f, 20f, 15f, 8f);
+                    break;
+                case 13:
+                    txt(c, "hulu", cx, cy + 15f * s, 46f * s, 0xFF1CE783, SANS_BOLD, false);
+                    break;
+                case 14:
+                    txt(c, "prime video", cx, cy + 2f * s, 26f * s, Color.WHITE, SANS_BOLD, false);
+                    arc(c, cx, cy, s, -42f, -4f, 42f, 24f, 15f, 150f, 3.5f, Color.WHITE);
+                    break;
+                case 15:
+                    paint.setColor(0xFFD81921);
+                    c.drawCircle(cx, cy, 36f * s, paint);
+                    txt(c, "abc", cx, cy + 10f * s, 30f * s, Color.WHITE, SANS_BOLD, false);
+                    break;
+                case 16:
+                    playBadge(c, cx, cy, s, -76f, -32f, 7f, -59f, -47f);
+                    txt(c, "YouTubeTV", cx - 26f * s, cy + 10f * s, 27f * s, Color.WHITE, CONDENSED_BOLD, true);
+                    break;
+                case 17:
+                    for (int i = 0; i < 8; i++) {
+                        c.save();
+                        c.rotate(i * 45f, cx, cy);
+                        rr(c, cx - 10f * s, cy - 42f * s, cx + 10f * s, cy - 6f * s, 10f * s, PHOTO_PETALS[i]);
+                        c.restore();
+                    }
+                    break;
+                case 18:
+                    paint.setStyle(Paint.Style.STROKE);
+                    paint.setStrokeCap(Paint.Cap.ROUND);
+                    paint.setStrokeWidth(9f * s);
+                    paint.setColor(Color.WHITE);
+                    c.drawLine(cx - 24f * s, cy + 24f * s, cx + 4f * s, cy - 28f * s, paint);
+                    c.drawLine(cx - 4f * s, cy - 28f * s, cx + 24f * s, cy + 24f * s, paint);
+                    c.drawLine(cx - 32f * s, cy + 10f * s, cx + 32f * s, cy + 10f * s, paint);
+                    break;
+                case 19:
+                    rr(c, b.left + 16f * s, b.top + 14f * s, b.left + 64f * s, b.top + 48f * s, 8f * s, 0x38FFFFFF);
+                    rr(c, b.left + 72f * s, b.top + 14f * s, b.left + 120f * s, b.top + 48f * s, 8f * s, 0x38FFFFFF);
+                    paint.setColor(Color.WHITE);
+                    c.drawCircle(b.left + 40f * s, b.top + 31f * s, 7f * s, paint);
+                    poly(c, b.left, b.top, s, Color.WHITE, 86f, 32f, 96f, 22f, 106f, 32f, 106f, 40f, 86f, 40f);
+                    break;
+                case 20:
+                    rr(c, cx - 32f * s, cy - 34f * s, cx + 32f * s, cy + 22f * s, 6f * s, 0xFF141416);
+                    poly(c, cx, cy, s, 0xFF141416, -18f, 20f, -18f, 34f, -4f, 20f);
+                    rr(c, cx - 24f * s, cy - 26f * s, cx + 24f * s, cy + 14f * s, 4f * s, Color.WHITE);
+                    paint.setColor(0xFF141416);
+                    c.drawRect(cx - 8f * s, cy - 16f * s, cx - 2f * s, cy + 2f * s, paint);
+                    c.drawRect(cx + 6f * s, cy - 16f * s, cx + 12f * s, cy + 2f * s, paint);
+                    break;
+                case 21:
+                    paint.setStyle(Paint.Style.STROKE);
+                    paint.setStrokeCap(Paint.Cap.ROUND);
+                    paint.setColor(Color.WHITE);
+                    paint.setStrokeWidth(7.5f * s);
+                    c.drawCircle(cx - 8f * s, cy - 8f * s, 21f * s, paint);
+                    c.drawLine(cx + 7f * s, cy + 7f * s, cx + 28f * s, cy + 28f * s, paint);
+                    break;
+                case 22:
+                    drawAppleGlyph(c, cx, cy + 4f * s, 20f * s, 0xFF1C1C1E, 0xFFF2F2F6);
+                    break;
+                case 23:
+                    paint.setColor(0xFF1ED760);
+                    c.drawCircle(cx, cy, 36f * s, paint);
+                    paint.setStrokeCap(Paint.Cap.ROUND);
+                    arc(c, cx, cy, s, -24f, -14f, 24f, 10f, 215f, 110f, 5.5f, 0xFF121212);
+                    arc(c, cx, cy, s, -19f, -3f, 19f, 18f, 215f, 110f, 4.5f, 0xFF121212);
+                    arc(c, cx, cy, s, -14f, 7f, 14f, 25f, 215f, 110f, 3.8f, 0xFF121212);
+                    break;
+                default:
+                    break;
+            }
+        }
+
+        private void drawAppleGlyph(Canvas c, float cx, float cy, float r, int color, int biteColor) {
+            paint.setStyle(Paint.Style.FILL);
+            paint.setColor(color);
+            path.reset();
+            path.moveTo(cx, cy - r * 0.52f);
+            path.cubicTo(cx + r * 0.55f, cy - r * 0.72f, cx + r * 1.05f, cy - r * 0.15f, cx + r * 0.85f, cy + r * 0.45f);
+            path.cubicTo(cx + r * 0.70f, cy + r * 0.98f, cx + r * 0.30f, cy + r * 1.05f, cx, cy + r * 0.88f);
+            path.cubicTo(cx - r * 0.30f, cy + r * 1.05f, cx - r * 0.70f, cy + r * 0.98f, cx - r * 0.85f, cy + r * 0.45f);
+            path.cubicTo(cx - r * 1.05f, cy - r * 0.15f, cx - r * 0.55f, cy - r * 0.72f, cx, cy - r * 0.52f);
+            path.close();
+            c.drawPath(path, paint);
+            paint.setColor(biteColor);
+            c.drawCircle(cx + r * 0.96f, cy - r * 0.04f, r * 0.36f, paint);
+            paint.setColor(color);
+            path.reset();
+            path.moveTo(cx, cy - r * 0.65f);
+            path.quadTo(cx + r * 0.08f, cy - r * 1.12f, cx + r * 0.45f, cy - r * 1.15f);
+            path.quadTo(cx + r * 0.36f, cy - r * 0.70f, cx, cy - r * 0.65f);
+            path.close();
+            c.drawPath(path, paint);
+        }
+
+        @Override public void setAlpha(int alpha) { paint.setAlpha(alpha); }
+        @Override public void setColorFilter(ColorFilter cf) { paint.setColorFilter(cf); }
+        @Override public int getOpacity() { return PixelFormat.OPAQUE; }
     }
 }

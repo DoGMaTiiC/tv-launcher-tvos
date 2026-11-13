@@ -180,8 +180,19 @@ public class MainActivity extends Activity implements AppAdapter.TileListener, C
     private Dialog controlCenterDialog;
     private DockDecoration dockDecoration;
     private boolean dockBlur;
+    private boolean topStageEnabled;
+    private boolean nightMode = true;
+    private TopStageView topStage;
+    private DockBlur.LiquidRenderer liquidRenderer;
+    private File wallpaperFile;
+    private final Map<String, Bitmap> rawHeroCache = new HashMap<>();
+    private final Map<String, DockBlur.Atmosphere> atmosphereCache = new HashMap<>();
     private boolean controlCenterEnabled;
     private boolean backLongPressed;
+    private float stageProgress;
+    private android.animation.ValueAnimator stageAnimator;
+    private boolean stageInGridState;
+    private boolean dndEnabled;
     /** The focus glow's colour while the cinematic shelf tints it, 0 for plain white glass. */
     private int glassAccent;
     private int ambientColor = -1;
@@ -459,7 +470,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener, C
             // signal level, so only it needs this minute's binder calls (about 7 ms on the UI thread).
             if (festive) updateWifiLabel();
             sky.update();
-            wallpaperPlayer.update();
+            if (wallpaperPlayer != null) wallpaperPlayer.update();
             handler.postDelayed(this, MINUTE_MS);
         }
     };
@@ -527,7 +538,8 @@ public class MainActivity extends Activity implements AppAdapter.TileListener, C
         // black under it is a second full-screen fill on every frame for nothing. The starting window still uses
         // the theme's background, so launch looks the same.
         getWindow().setBackgroundDrawable(null);
-        wallpaperPlayer = new WallpaperPlayer(this, root, cfg);
+        topStageEnabled = cfg.heroArt && cfg.dockBlur;
+        wallpaperPlayer = topStageEnabled ? null : new WallpaperPlayer(this, root, cfg);
         sky = findViewById(R.id.sky);
         sky.setIntensity(cfg.skyIntensity);
         glass = findViewById(R.id.glass);
@@ -556,8 +568,11 @@ public class MainActivity extends Activity implements AppAdapter.TileListener, C
         heroArtAlpha = cfg.cinematicArt / 100f;
         heroArtEnabled = cfg.heroArt;
         if (heroArtEnabled && heroArtAlpha <= 0f) heroArtAlpha = 0.85f;
-        if (cinematic) setUpCinematicShelf(cfg.cinematicScrim);
-        if (heroArtEnabled && !cinematic) {
+        topStageEnabled = heroArtEnabled && cfg.dockBlur;
+        nightMode = cfg.isNightMode();
+        wallpaperFile = cfg.wallpaper;
+        if (cinematic && !topStageEnabled) setUpCinematicShelf(cfg.cinematicScrim);
+        if (heroArtEnabled && !cinematic && !topStageEnabled) {
             heroArt.setVisibility(View.VISIBLE);
             heroArt.forceHasOverlappingRendering(false);
             if (cfg.cinematicScrim > 0) {
@@ -570,7 +585,52 @@ public class MainActivity extends Activity implements AppAdapter.TileListener, C
         }
         // dock_title false: the name above the dock (and the cinematic lines under it) never shows; the glow
         // still follows the dock.
-        if (!cfg.dockTitle) hero.setVisibility(View.GONE);
+        if (!cfg.dockTitle || topStageEnabled) hero.setVisibility(View.GONE);
+        if (topStageEnabled) {
+            root.setBackgroundColor(nightMode ? 0xFF0A0A0C : 0xFFEBEBF0);
+            sky.setVisibility(View.GONE);
+            ambient.setVisibility(View.GONE);
+            glass.setVisibility(View.GONE);
+            heroArt.setVisibility(View.VISIBLE);
+            heroArt.setAlpha(1f);
+            heroArt.forceHasOverlappingRendering(false);
+            findViewById(R.id.heroScrim).setVisibility(View.GONE);
+            View headerBar = (View) findViewById(R.id.leftBlock).getParent();
+            if (headerBar != null) headerBar.setVisibility(View.GONE);
+            findViewById(R.id.leftBlock).setVisibility(View.GONE);
+            findViewById(R.id.topButtons).setVisibility(View.GONE);
+            liquidRenderer = new DockBlur.LiquidRenderer();
+            topStage = new TopStageView(this, liquidRenderer, new TopStageView.Listener() {
+                @Override public void onReturnToDock() {
+                    focusTile(Math.max(0, Math.min(lastFocused, adapter.appCount() - 1)));
+                }
+                @Override public void onLaunchCard(String pkg) {
+                    if (pkg == null) return;
+                    for (int i = 0; i < adapter.appCount(); i++) {
+                        if (pkg.equals(adapter.packageAt(i))) {
+                            RecyclerView.ViewHolder vh = grid.findViewHolderForAdapterPosition(i);
+                            if (vh != null) {
+                                View card = vh.itemView.findViewById(R.id.card);
+                                if (card != null) { card.performClick(); return; }
+                            }
+                        }
+                    }
+                    Intent launch = getPackageManager().getLeanbackLaunchIntentForPackage(pkg);
+                    if (launch == null) launch = getPackageManager().getLaunchIntentForPackage(pkg);
+                    if (launch != null) open(launch);
+                }
+                @Override public void onLiveTv() {
+                    Intent lt = liveTvIntent();
+                    if (lt != null) open(lt);
+                    else showInputs();
+                }
+                @Override public void onInputs() { showInputs(); }
+                @Override public void onControlCenter() { showControlCenter(); }
+            });
+            topStage.setNightMode(nightMode);
+            root.addView(topStage, root.indexOfChild(hero) + 1,
+                    new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        }
         greeting = findViewById(R.id.greeting);
         clockBlock = findViewById(R.id.leftBlock);
         clockRefresh = new ClockRefresh(clockBlock);
@@ -644,6 +704,18 @@ public class MainActivity extends Activity implements AppAdapter.TileListener, C
         libraryExcludedApps = new HashSet<>(cfg.libraryExcludedApps);
 
         grid = findViewById(R.id.grid);
+        if (topStageEnabled) {
+            View gridWrapper = (View) grid.getParent();
+            if (gridWrapper != null) {
+                if (gridWrapper.getLayoutParams() instanceof ViewGroup.MarginLayoutParams) {
+                    ((ViewGroup.MarginLayoutParams) gridWrapper.getLayoutParams()).topMargin = 0;
+                }
+                View mainCol = (View) gridWrapper.getParent();
+                if (mainCol != null) {
+                    mainCol.setPadding(mainCol.getPaddingLeft(), 0, mainCol.getPaddingRight(), mainCol.getPaddingBottom());
+                }
+            }
+        }
         rtlAppGrid = getResources().getBoolean(R.bool.rtl_app_grid);
         // Mirror only the app grid; the header and other locales keep their own layouts.
         // single_row: one span laid out sideways, so the same adapter, glass and dock band serve a scrolling row.
@@ -720,8 +792,11 @@ public class MainActivity extends Activity implements AppAdapter.TileListener, C
             dockBlur = cfg.dockBlur;
             dockDecoration = new DockDecoration(COLUMNS, density, cinematic, cfg.alwaysShowNames && !cfg.dockBlur, cfg.dockOpacity, cfg.dockGlass, cfg.dockEvenPadding, cfg.dockBand,
                     singleRow, cfg.dockBandAll, cfg.dockBlur);
+            if (topStageEnabled && liquidRenderer != null) {
+                dockDecoration.setLiquidGlass(liquidRenderer, nightMode);
+            }
             grid.addItemDecoration(dockDecoration);
-            if (cfg.dockBlur && cfg.wallpaper != null && cfg.wallpaper.isFile()) {
+            if (!topStageEnabled && cfg.dockBlur && cfg.wallpaper != null && cfg.wallpaper.isFile()) {
                 final File wp = cfg.wallpaper;
                 if (heroArtExecutor == null) heroArtExecutor = java.util.concurrent.Executors.newSingleThreadExecutor();
                 heroArtExecutor.execute(() -> {
@@ -770,8 +845,29 @@ public class MainActivity extends Activity implements AppAdapter.TileListener, C
             // A single row never shows the names under its tiles (the title above the row names the app), so the
             // 7dp gap and 22dp label item_app.xml keeps for them would only lift the row: sit it that much lower.
             if (singleRow && !cfg.alwaysShowNames) want += (int) (29 * density);
+            if (topStageEnabled && !singleRow) {
+                float k = h / 1080f;
+                // State 2 places Row 0 at the top of the screen (card top at y ≈ 56 * k),
+                // and State 1 translates grid downward so Row 0 sits at y ≈ 770 * k with Row 1 peeking.
+                want = Math.max(0, Math.round(56f * k - 18f * density));
+            }
+            if (topStageEnabled && !singleRow && adapter.appCount() > 0) {
+                int unfilled = Math.max(0, COLUMNS - adapter.dockFilled());
+                float shiftX = unfilled > 0 ? (unfilled * (inner / (float) COLUMNS)) / 2f : 0f;
+                if (Math.abs(grid.getTranslationX() - shiftX) > 1f) grid.setTranslationX(shiftX);
+            }
             if (grid.getPaddingTop() != want) {
                 grid.setPadding(grid.getPaddingLeft(), want, grid.getPaddingRight(), grid.getPaddingBottom());
+                if (topStageEnabled && !singleRow) {
+                    grid.post(() -> {
+                        if (!isDestroyed() && !isFinishing() && grid.getLayoutManager() instanceof GridLayoutManager) {
+                            ((GridLayoutManager) grid.getLayoutManager()).scrollToPositionWithOffset(0, 0);
+                            if (stageAnimator == null || !stageAnimator.isRunning()) {
+                                applyStageProgress(stageInGridState ? 1f : 0f);
+                            }
+                        }
+                    });
+                }
                 // A vertical grid parks the dock on the new padding line by scrolling (onTileFocused); a sideways
                 // row cannot scroll vertically, and the layout request made from inside this layout pass is
                 // dropped, so lay the row out again on the next frame. The glass and the title were placed for the
@@ -789,6 +885,8 @@ public class MainActivity extends Activity implements AppAdapter.TileListener, C
                     });
                     grid.requestLayout();
                 });
+            } else if (topStageEnabled && !singleRow && (stageAnimator == null || !stageAnimator.isRunning())) {
+                applyStageProgress(stageInGridState ? 1f : 0f);
             }
             // Cold start or column count > 4: the first focus can run before the grid has its final width or
             // padding, leaving the glass at the XML design size until a key is pressed.
@@ -1150,6 +1248,10 @@ public class MainActivity extends Activity implements AppAdapter.TileListener, C
         if (openInputsIfAsked(intent)) return;
         if (intent == null || !intent.hasCategory(Intent.CATEGORY_HOME)) return;
         if (gameDay != null && !stopped) gameDay.read();
+        if (topStageEnabled && topStage != null) {
+            topStage.clearStageFocus();
+            transitionStageState(false, false);
+        }
         grid.scrollToPosition(0);
         lastFocused = 0;
         lastFocusedKey = adapter.getItemCount() > 0 ? adapter.keyAt(0) : null;
@@ -1229,10 +1331,22 @@ public class MainActivity extends Activity implements AppAdapter.TileListener, C
         if (showStats) startStats();
         if (gameDay != null) gameDay.start();
         sky.update();
-        wallpaperPlayer.start();
-        if (musicPill != null) {
+        if (wallpaperPlayer != null) wallpaperPlayer.start();
+        if (topStageEnabled) {
+            int pos = Math.max(0, Math.min(lastFocused, Math.max(0, adapter.appCount() - 1)));
+            if (topStage != null && adapter.appCount() > 0) {
+                topStage.setFocusedDock(pos, adapter.packageAt(pos), adapter.labelAt(pos));
+            }
+            updateTopStage(pos);
+            transitionStageState(pos >= COLUMNS && !singleRow, false);
+        }
+        if (musicPill != null && !topStageEnabled) {
             musicPill.attach(root);
             grid.post(() -> { if (!isDestroyed() && musicPill != null) musicPill.show(); });
+        }
+        if (topStageEnabled && topStage != null && musicPill != null) {
+            topStage.setNowPlaying(ControlCenter.formatNowPlaying(
+                    nowPlayingTitle(), nowPlayingArtist(), isMediaPlaying()), isMediaPlaying());
         }
         handler.postDelayed(minuteTick, MINUTE_MS);
         if (festive && lamp != null) {
@@ -1305,7 +1419,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener, C
             hero.setAlpha(0f);
             ambient.setAlpha(0f);
             heroArt.animate().cancel();
-            heroArt.setAlpha(0f);
+            if (!topStageEnabled) heroArt.setAlpha(0f);
         }
         if (rebuild) reloadTiles();
         if (animate && entrance && animations && !reducedMotion) {
@@ -1355,6 +1469,8 @@ public class MainActivity extends Activity implements AppAdapter.TileListener, C
         final List<Cards.Card> none = Collections.emptyList();
         // An updated app may bring new artwork; the backdrop is cheap to make again.
         heroArtCache.clear();
+        rawHeroCache.clear();
+        atmosphereCache.clear();
         heroArtKey = null;
         // One LEANBACK query for both the tiles and the card checks.
         final List<ResolveInfo> leanback = getPackageManager().queryIntentActivities(
@@ -1407,7 +1523,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener, C
         cancelHoldOk();
         root.removeCallbacks(showIdleClock);
         endReorder();   // Home or another app while reordering keeps the order so far
-        wallpaperPlayer.stop();
+        if (wallpaperPlayer != null) wallpaperPlayer.stop();
         stopAmbientAnimation();
         hero.animate().cancel();
         ambient.animate().cancel();
@@ -1454,8 +1570,10 @@ public class MainActivity extends Activity implements AppAdapter.TileListener, C
         grid.setAdapter(null);
         grid.getRecycledViewPool().clear();
         heroArtCache.clear();
+        rawHeroCache.clear();
+        atmosphereCache.clear();
         heroArtKey = null;
-        wallpaperPlayer.releaseForMemoryPressure();
+        if (wallpaperPlayer != null) wallpaperPlayer.releaseForMemoryPressure();
         tileRefresh.invalidate();
     }
 
@@ -1486,6 +1604,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener, C
         cancelHoldOk();
         if (gameDay != null) gameDay.shutdown();
         if (heroArtExecutor != null) heroArtExecutor.shutdownNow();
+        if (stageAnimator != null) stageAnimator.cancel();
         if (controlCenterDialog != null && controlCenterDialog.isShowing()) controlCenterDialog.dismiss();
         if (musicPill != null) {
             musicPill.hide();
@@ -1493,7 +1612,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener, C
         }
         unregisterReceiver(packageReceiver);
         if (openOnStartOnWake) unregisterReceiver(wakeReceiver);
-        wallpaperPlayer.close();
+        if (wallpaperPlayer != null) wallpaperPlayer.close();
         ConnectivityManager cm = getApplicationContext().getSystemService(ConnectivityManager.class);   // as registered
         TvInputManager tim = (TvInputManager) getSystemService(TV_INPUT_SERVICE);
         if (tim != null) tim.unregisterCallback(inputCallback);
@@ -1978,7 +2097,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener, C
             glassAccent = accent;
             glass.setAccent(accent);
         }
-        if (!glassShown) {
+        if (!glassShown && !topStageEnabled) {
             springX.cancel();
             springY.cancel();
             glass.setTranslationX(x);
@@ -2033,7 +2152,24 @@ public class MainActivity extends Activity implements AppAdapter.TileListener, C
             }
         }
         View item = (View) card.getParent();
-        if (dockRow && (singleRow || position < COLUMNS)) {
+        if (topStageEnabled) {
+            boolean inDock = singleRow || position < COLUMNS;
+            if (inDock) {
+                if (!singleRow && grid.computeVerticalScrollOffset() != 0
+                        && grid.getLayoutManager() instanceof GridLayoutManager) {
+                    ((GridLayoutManager) grid.getLayoutManager()).scrollToPositionWithOffset(0, 0);
+                }
+                transitionStageState(false, true);
+                if (topStage != null) {
+                    topStage.setFocusedDock(position, adapter.packageAt(position), adapter.labelAt(position));
+                }
+                updateTopStage(position);
+            } else {
+                transitionStageState(true, true);
+                revealRect.set(0, -(int) pad * 2, item.getWidth(), item.getHeight() + (int) pad);
+                grid.requestChildRectangleOnScreen(item, revealRect, reducedMotion);
+            }
+        } else if (dockRow && (singleRow || position < COLUMNS)) {
             // Dock: park it at the bottom of the screen and show the top shelf for this app. In a single row
             // every tile is in the dock's row, which never scrolls vertically.
             int decoratedTop = item.getTop() - (int) (6 * density);
@@ -2054,6 +2190,57 @@ public class MainActivity extends Activity implements AppAdapter.TileListener, C
             revealRect.set(0, -(int) pad * 2, item.getWidth(), item.getHeight() + (int) pad);
             grid.requestChildRectangleOnScreen(item, revealRect, reducedMotion);
         }
+    }
+
+    private float computeState1TranslationY() {
+        int h = root != null && root.getHeight() > 0 ? root.getHeight() : grid.getHeight();
+        if (h <= 0) return 0f;
+        float k = h / 1080f;
+        float dockTargetY = Math.round(770f * k);
+        int cardTopInGrid = grid.getPaddingTop() + Math.round(18f * density);
+        RecyclerView.LayoutManager lm = grid.getLayoutManager();
+        View row0 = lm != null ? lm.findViewByPosition(0) : null;
+        if (row0 != null) {
+            View c0 = row0.findViewById(R.id.card);
+            cardTopInGrid = row0.getTop() + (c0 != null ? c0.getTop() : Math.round(8f * density));
+        }
+        float ty = dockTargetY - cardTopInGrid;
+        View row1 = lm != null && adapter.appCount() > COLUMNS ? lm.findViewByPosition(COLUMNS) : null;
+        if (row1 != null) {
+            View c1 = row1.findViewById(R.id.card);
+            int row1CardTopInGrid = row1.getTop() + (c1 != null ? c1.getTop() : Math.round(8f * density));
+            float peekTy = (h - Math.round(28f * k)) - row1CardTopInGrid;
+            if (peekTy >= ty - 30f * k && peekTy <= (Math.round(845f * k) - cardTopInGrid)) {
+                ty = peekTy;
+            }
+        }
+        return Math.max(0f, ty);
+    }
+
+    private void applyStageProgress(float p) {
+        stageProgress = Math.max(0f, Math.min(1f, p));
+        if (topStage != null) topStage.setScrollProgress(stageProgress);
+        grid.setTranslationY(computeState1TranslationY() * (1f - stageProgress));
+    }
+
+    private void transitionStageState(boolean toGrid, boolean animate) {
+        stageInGridState = toGrid;
+        float target = toGrid ? 1f : 0f;
+        if (!animate || !animations || reducedMotion) {
+            if (stageAnimator != null) stageAnimator.cancel();
+            applyStageProgress(target);
+            return;
+        }
+        if (Math.abs(stageProgress - target) < 0.005f && (stageAnimator == null || !stageAnimator.isRunning())) {
+            applyStageProgress(target);
+            return;
+        }
+        if (stageAnimator != null) stageAnimator.cancel();
+        stageAnimator = android.animation.ValueAnimator.ofFloat(stageProgress, target);
+        stageAnimator.setDuration(300L);
+        stageAnimator.setInterpolator(new android.view.animation.DecelerateInterpolator(1.6f));
+        stageAnimator.addUpdateListener(anim -> applyStageProgress((Float) anim.getAnimatedValue()));
+        stageAnimator.start();
     }
 
     /** Refits the glass to the focused holder once the grid layout and tile dimensions settle. */
@@ -2203,6 +2390,10 @@ public class MainActivity extends Activity implements AppAdapter.TileListener, C
 
     /** Swaps the backdrop to this app's artwork: fade out, swap, fade in, the way the shelf's name changes. */
     private void showHeroArt(int position) {
+        if (topStageEnabled && topStage != null) {
+            updateTopStage(position);
+            return;
+        }
         String key = adapter.keyAt(position);
         if (key == null) return;
         final int gen = ++heroArtGeneration;
@@ -2254,6 +2445,88 @@ public class MainActivity extends Activity implements AppAdapter.TileListener, C
             heroArt.setImageBitmap(next);
             heroArt.animate().alpha(heroArtAlpha).setDuration(fadeInMs).start();
         }).start();
+    }
+
+    private void updateTopStage(int position) {
+        int filled = Math.max(1, Math.min(adapter.dockFilled(), adapter.appCount()));
+        if (filled <= 0) return;
+        final int[] idxs = {position % filled, (position + 1) % filled, (position + 2) % filled};
+        final String[] pkgs = new String[3];
+        final String[] titles = new String[3];
+        final String[] metas = new String[3];
+        final int[] accents = new int[3];
+        final Drawable[] fallbacks = new Drawable[3];
+        final File themeDir = Config.dir(this);
+        for (int i = 0; i < 3; i++) {
+            int p = idxs[i];
+            pkgs[i] = adapter.packageAt(p);
+            titles[i] = adapter.labelAt(p);
+            accents[i] = adapter.ambientColorAt(p);
+            fallbacks[i] = adapter.artworkAt(p);
+            long when = LastOpened.get(this, pkgs[i]);
+            if (when > 0) {
+                metas[i] = getString(R.string.last_opened, LastOpened.describe(this, when))
+                        + (i == 0 ? "  \u00B7  Press OK to Launch" : "");
+            } else if (i == 0) {
+                metas[i] = "Featured  \u00B7  4K HDR  \u00B7  Press OK to Launch";
+            } else {
+                String pk = pkgs[i] == null ? "" : pkgs[i].toLowerCase(Locale.ROOT);
+                metas[i] = pk.contains("vending") ? "Apps & Games"
+                        : pk.contains("settings") ? "Display & Audio"
+                        : pk.contains("youtube") ? "4K Streaming" : "App Shelf";
+            }
+        }
+        final int gen = ++heroArtGeneration;
+        if (heroArtExecutor == null) heroArtExecutor = java.util.concurrent.Executors.newSingleThreadExecutor();
+        heroArtExecutor.execute(() -> {
+            final Bitmap[] bmps = new Bitmap[3];
+            for (int i = 0; i < 3; i++) {
+                String rKey = pkgs[i] != null ? pkgs[i] : ("idx:" + idxs[i]);
+                Bitmap b = rawHeroCache.get(rKey);
+                if (b == null) {
+                    File hf = HeroArt.findHeroFile(themeDir, pkgs[i]);
+                    if (hf == null && wallpaperFile != null && wallpaperFile.isFile()) {
+                        hf = wallpaperFile;
+                        rKey = "wallpaper";
+                        b = rawHeroCache.get(rKey);
+                    }
+                    if (b == null && hf != null) {
+                        b = HeroArt.decodeRawHero(hf, 1080, 464);
+                    }
+                    if (b == null) {
+                        b = HeroArt.from(fallbacks[i]);
+                    }
+                    if (b != null) rawHeroCache.put(rKey, b);
+                }
+                bmps[i] = b;
+            }
+            String aKey = (pkgs[0] != null ? pkgs[0] : "wp") + ":" + nightMode;
+            DockBlur.Atmosphere atmo = atmosphereCache.get(aKey);
+            if (atmo == null && bmps[0] != null) {
+                atmo = DockBlur.makeAtmosphere(bmps[0], nightMode);
+                if (atmo != null) atmosphereCache.put(aKey, atmo);
+            }
+            final DockBlur.Atmosphere finalAtmo = atmo;
+            handler.post(() -> {
+                if (gen != heroArtGeneration || isDestroyed() || isFinishing() || topStage == null) return;
+                if (finalAtmo != null) {
+                    heroArt.setImageBitmap(finalAtmo.backdropBitmap);
+                    heroArt.setAlpha(1f);
+                    if (liquidRenderer != null) {
+                        liquidRenderer.setGlassPixels(finalAtmo.glassPixels);
+                        grid.invalidateItemDecorations();
+                    }
+                }
+                topStage.setCards(
+                        new TopStageView.CardData(pkgs[0], titles[0], metas[0], bmps[0], accents[0]),
+                        new TopStageView.CardData(pkgs[1], titles[1], metas[1], bmps[1], accents[1]),
+                        new TopStageView.CardData(pkgs[2], titles[2], metas[2], bmps[2], accents[2]));
+                if (musicPill != null) {
+                    topStage.setNowPlaying(ControlCenter.formatNowPlaying(
+                            nowPlayingTitle(), nowPlayingArtist(), isMediaPlaying()), isMediaPlaying());
+                }
+            });
+        });
     }
 
     private void fadeHeroArt(int ms) {
@@ -2403,7 +2676,7 @@ public class MainActivity extends Activity implements AppAdapter.TileListener, C
         ambient.animate().cancel();
         hero.setAlpha(0f);
         heroArt.animate().cancel();
-        heroArt.setAlpha(0f);
+        if (!topStageEnabled) heroArt.setAlpha(0f);
         heroShown = false;
         if (!ambientGlow) return;
         if (!animations || reducedMotion) {
@@ -2437,11 +2710,11 @@ public class MainActivity extends Activity implements AppAdapter.TileListener, C
         if (animations && !reducedMotion) {
             hero.animate().alpha(0f).setDuration(160).start();
             if (ambientGlow) ambient.animate().alpha(0f).setDuration(300).start();
-            heroArt.animate().alpha(0f).setDuration(300).start();
+            if (!topStageEnabled) heroArt.animate().alpha(0f).setDuration(300).start();
         } else {
             hero.setAlpha(0f);
             ambient.setAlpha(0f);
-            heroArt.setAlpha(0f);
+            if (!topStageEnabled) heroArt.setAlpha(0f);
         }
     }
 
@@ -2664,6 +2937,10 @@ public class MainActivity extends Activity implements AppAdapter.TileListener, C
                     rtlAppGrid, keyCode == KeyEvent.KEYCODE_DPAD_LEFT);
         }
         if (keyCode == KeyEvent.KEYCODE_DPAD_UP) {
+            if (topStageEnabled && topStage != null && (singleRow || position < COLUMNS)) {
+                topStage.enterFromDock(false);
+                return true;
+            }
             if (position < COLUMNS) return false;          // dock row: let focus move to the top bar
             target = position - COLUMNS;
         } else {
@@ -3903,6 +4180,21 @@ public class MainActivity extends Activity implements AppAdapter.TileListener, C
     @Override public String nowPlayingTitle() { return musicPill != null ? musicPill.getNowPlaying().title : ""; }
     @Override public String nowPlayingArtist() { return musicPill != null ? musicPill.getNowPlaying().artist : ""; }
     @Override public boolean isMediaPlaying() { return musicPill != null && musicPill.getNowPlaying().playing; }
+    @Override public String onCycleMusicCorner() {
+        String next = MusicPill.nextCorner(musicPill != null ? musicPill.getCorner() : "top_right");
+        if (musicPill != null) musicPill.setCorner(next);
+        return ControlCenter.formatCornerLabel(next);
+    }
+    @Override public void onSearch() { onLibraryRequested(); }
+    @Override public boolean onToggleDoNotDisturb() {
+        dndEnabled = !dndEnabled;
+        return dndEnabled;
+    }
+    @Override public void onAudioRouteSelected(String route) {
+        if (route != null && !route.isEmpty()) {
+            android.widget.Toast.makeText(this, route, android.widget.Toast.LENGTH_SHORT).show();
+        }
+    }
 
     private void showTopMenu() {
         View anchor = findViewById(R.id.btnSettings);

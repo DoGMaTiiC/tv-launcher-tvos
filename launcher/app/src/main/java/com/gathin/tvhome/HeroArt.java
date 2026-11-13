@@ -76,6 +76,15 @@ final class HeroArt {
      * and applies {@link #applyVignette(int[], int, int)}. Intended to run off the UI thread.
      */
     static Bitmap decodeHero(File file, int screenW, int screenH) {
+        return decodeHeroFile(file, screenW, screenH, true);
+    }
+
+    /** Decodes crisp hero artwork for Bento showcase cards without full-screen edge darkening. */
+    static Bitmap decodeRawHero(File file, int reqW, int reqH) {
+        return decodeHeroFile(file, reqW, reqH, false);
+    }
+
+    private static Bitmap decodeHeroFile(File file, int screenW, int screenH, boolean vignette) {
         if (file == null || !file.isFile() || screenW <= 0 || screenH <= 0) return null;
         try {
             BitmapFactory.Options options = new BitmapFactory.Options();
@@ -94,20 +103,22 @@ final class HeroArt {
                 options.inTargetDensity = scale[1];
             }
             options.inPreferredConfig = Bitmap.Config.ARGB_8888;
-            options.inMutable = true;
+            options.inMutable = vignette;
             Bitmap bmp = BitmapFactory.decodeFile(file.getPath(), options);
             if (bmp == null) return null;
-            if (!bmp.isMutable()) {
-                Bitmap copy = bmp.copy(Bitmap.Config.ARGB_8888, true);
-                bmp.recycle();
-                if (copy == null) return null;
-                bmp = copy;
+            if (vignette) {
+                if (!bmp.isMutable()) {
+                    Bitmap copy = bmp.copy(Bitmap.Config.ARGB_8888, true);
+                    bmp.recycle();
+                    if (copy == null) return null;
+                    bmp = copy;
+                }
+                int bw = bmp.getWidth(), bh = bmp.getHeight();
+                int[] px = new int[bw * bh];
+                bmp.getPixels(px, 0, bw, 0, 0, bw, bh);
+                applyVignette(px, bw, bh);
+                bmp.setPixels(px, 0, bw, 0, 0, bw, bh);
             }
-            int bw = bmp.getWidth(), bh = bmp.getHeight();
-            int[] px = new int[bw * bh];
-            bmp.getPixels(px, 0, bw, 0, 0, bw, bh);
-            applyVignette(px, bw, bh);
-            bmp.setPixels(px, 0, bw, 0, 0, bw, bh);
             return bmp;
         } catch (Exception | OutOfMemoryError failure) {
             return null;
@@ -159,9 +170,10 @@ final class HeroArt {
         small.getPixels(px, 0, W, 0, 0, W, H);
         saturate(px);
         // Three box passes approximate a gaussian, so the stretched image shows no seams between pixels.
+        int[] tmp = new int[W * H];
         for (int pass = 0; pass < 3; pass++) {
-            px = boxBlur(px, W, H, 2, true);
-            px = boxBlur(px, W, H, 2, false);
+            DockBlur.box(px, tmp, W, H, 2, true);
+            DockBlur.box(tmp, px, W, H, 2, false);
         }
         Bitmap out = small.isMutable() ? small : small.copy(Bitmap.Config.ARGB_8888, true);
         if (out != small) small.recycle();
@@ -181,25 +193,5 @@ final class HeroArt {
 
     private static int clamp(float v) {
         return v < 0 ? 0 : v > 255 ? 255 : Math.round(v);
-    }
-
-    /** One box blur pass along rows (horizontal) or columns, edges clamped. */
-    private static int[] boxBlur(int[] src, int w, int h, int radius, boolean horizontal) {
-        int[] dst = new int[src.length];
-        int lines = horizontal ? h : w, length = horizontal ? w : h, span = 2 * radius + 1;
-        for (int line = 0; line < lines; line++) {
-            for (int i = 0; i < length; i++) {
-                int r = 0, g = 0, b = 0;
-                for (int k = -radius; k <= radius; k++) {
-                    int j = Math.max(0, Math.min(length - 1, i + k));
-                    int p = horizontal ? src[line * w + j] : src[j * w + line];
-                    r += Color.red(p);
-                    g += Color.green(p);
-                    b += Color.blue(p);
-                }
-                dst[horizontal ? line * w + i : i * w + line] = Color.rgb(r / span, g / span, b / span);
-            }
-        }
-        return dst;
     }
 }

@@ -6,6 +6,7 @@ import android.graphics.Canvas;
 import android.graphics.LinearGradient;
 import android.graphics.Matrix;
 import android.graphics.Paint;
+import android.graphics.RadialGradient;
 import android.graphics.Rect;
 import android.graphics.RectF;
 import android.graphics.Shader;
@@ -32,6 +33,15 @@ public class DockDecoration extends RecyclerView.ItemDecoration {
     private final boolean lightGlass;
     /** Frosted Glass Dock (config.xml dock_blur): softened backdrop crop + 0x18FFFFFF->0x0AFFFFFF fill + 1.5dp rim. */
     private final boolean dockBlur;
+    private DockBlur.LiquidRenderer liquidRenderer;
+    private DockBlur.ShadowCache shadowCache;
+    private boolean nightMode = true;
+    private final int[] winLoc = new int[2];
+    private final RectF shadowRect = new RectF();
+    private final Paint radiosityPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Matrix radiosityMatrix = new Matrix();
+    private int radiosityColor = 0;
+    private RadialGradient radiosityShader;
     /** Padding all round the tiles equal to the gap between them (config.xml dock_even_padding). */
     private final boolean evenPadding;
     /** The band's top and bottom the glass gradient was made for; it is remade when they move. */
@@ -81,6 +91,17 @@ public class DockDecoration extends RecyclerView.ItemDecoration {
         edge.setColor(DockBlur.rimColor(dockBlur, lightGlass, translucent));
     }
 
+    /** Attaches shared AGSL Liquid Glass renderer and appearance variant for the shelf platter. */
+    void setLiquidGlass(DockBlur.LiquidRenderer liquid, boolean nightMode) {
+        this.liquidRenderer = liquid;
+        this.nightMode = nightMode;
+        if (this.shadowCache == null) this.shadowCache = new DockBlur.ShadowCache();
+    }
+
+    void setNightMode(boolean nightMode) {
+        this.nightMode = nightMode;
+    }
+
     /** Sets an optional wallpaper crop behind the Glass Dock; softened once off-frame and drawn via BitmapShader. */
     public void setBackdropCrop(Bitmap crop) {
         Bitmap softened = DockBlur.softenBackdropCrop(crop);
@@ -119,14 +140,22 @@ public class DockDecoration extends RecyclerView.ItemDecoration {
                                @NonNull RecyclerView.State state) {
         int pos = parent.getChildAdapterPosition(view);
         if (pos >= 0 && (singleRow || pos < dockSize)) {
-            outRect.top = (int) (6 * density);
-            outRect.bottom = (int) (12 * density);
+            outRect.top = Math.round((dockBlur ? 12f : 6f) * density);
+            outRect.bottom = Math.round((dockBlur ? 24f : 12f) * density);
         }
     }
 
     @Override
     public void onDraw(@NonNull Canvas c, @NonNull RecyclerView parent, @NonNull RecyclerView.State state) {
-        if (!bandVisible) return;
+        if (bandVisible) {
+            drawDockPlatter(c, parent);
+        }
+        if (dockBlur) {
+            drawFocusedRadiosity(c, parent);
+        }
+    }
+
+    private void drawDockPlatter(Canvas c, RecyclerView parent) {
         boolean any = false;
         int cardWidth = 0;
         for (int i = 0; i < parent.getChildCount(); i++) {
@@ -135,7 +164,7 @@ public class DockDecoration extends RecyclerView.ItemDecoration {
             if (pos < 0 || (!bandAll && pos >= dockSize)) continue;
             RecyclerView.ViewHolder vh = parent.getChildViewHolder(child);
             View card = vh instanceof AppAdapter.Holder ? ((AppAdapter.Holder) vh).card : child.findViewById(R.id.card);
-            if (card == null) continue;
+            if (card == null || (dockBlur && card.getVisibility() != View.VISIBLE)) continue;
             float l = child.getLeft() + card.getLeft();
             float t = child.getTop() + card.getTop() + child.getTranslationY();
             float r = l + card.getWidth();
@@ -157,13 +186,15 @@ public class DockDecoration extends RecyclerView.ItemDecoration {
         // outwards and still keeps about the band's top margin from its rounded end.
         float sidePad = 22 * density;
         float side = Math.max(0f, Math.min(sidePad, Math.min(rect.left, parent.getWidth() - rect.right) - density));
-        float radius = AppAdapter.cornerRadius(cardWidth, density);
+        float radius = AppAdapter.cornerRadius(cardWidth, density, dockBlur);
         if (evenPadding) {
             // The same padding on all four sides, so the band's corners are concentric with the tiles' everywhere.
             int inner = parent.getWidth() - parent.getPaddingLeft() - parent.getPaddingRight();
-            // A single row's tiles can run off the screen, so only its top limits the padding; its ends are clamped below.
-            float room = (singleRow ? rect.top : Math.min(rect.top, Math.min(rect.left, parent.getWidth() - rect.right))) - density;
+            float room = dockBlur
+                    ? 20f * density
+                    : (singleRow ? rect.top : Math.min(rect.top, Math.min(rect.left, parent.getWidth() - rect.right))) - density;
             float even = evenPaddingPx(inner, dockSize, cardWidth, room);
+            if (dockBlur) even = Math.max(14f * density, Math.min(even, 18f * density));
             rect.inset(-even, -even);
             radius = radiusPx(radius, even);
         } else {
@@ -178,6 +209,22 @@ public class DockDecoration extends RecyclerView.ItemDecoration {
             rect.right = Math.min(rect.right, parent.getWidth() - density);
         }
         rect.bottom += namesRoom;
+        if (dockBlur && liquidRenderer != null) {
+            View rootView = parent.getRootView();
+            int screenW = rootView != null && rootView.getWidth() > 0 ? rootView.getWidth() : parent.getWidth();
+            int screenH = rootView != null && rootView.getHeight() > 0 ? rootView.getHeight() : parent.getHeight();
+            float k = screenW > 0 ? screenW / 1920f : 1f;
+            parent.getLocationInWindow(winLoc);
+            if (shadowCache != null) {
+                shadowRect.set(rect);
+                shadowRect.offset(0f, 16f * k);
+                shadowCache.draw(c, shadowRect, radius, DockBlur.SHADOW_BLUR * k,
+                        nightMode ? 0x7A000000 : 0x38000000);
+            }
+            liquidRenderer.draw(c, rect, radius, screenW, screenH,
+                    winLoc[0], winLoc[1], nightMode, 0.04f, 0.85f);
+            return;
+        }
         if (dockBlur) {
             Shader savedShader = band.getShader();
             int savedColor = band.getColor();
@@ -217,5 +264,47 @@ public class DockDecoration extends RecyclerView.ItemDecoration {
         }
         c.drawRoundRect(rect, radius, radius, band);
         c.drawRoundRect(rect, radius, radius, edge);
+    }
+
+    /**
+     * Draws ZZZZRadiosityImage-style ambient colored glow underneath the currently focused app tile
+     * (+40pt bleed around the 250x150 icon, matching HeadBoardIconRendering).
+     */
+    private void drawFocusedRadiosity(Canvas c, RecyclerView parent) {
+        RecyclerView.Adapter<?> raw = parent.getAdapter();
+        if (!(raw instanceof AppAdapter)) return;
+        AppAdapter adapter = (AppAdapter) raw;
+        for (int i = 0; i < parent.getChildCount(); i++) {
+            View child = parent.getChildAt(i);
+            RecyclerView.ViewHolder vh = parent.getChildViewHolder(child);
+            View card = vh instanceof AppAdapter.Holder ? ((AppAdapter.Holder) vh).card : child.findViewById(R.id.card);
+            if (card == null || card.getVisibility() != View.VISIBLE) continue;
+            if (!card.isFocused() && !child.hasFocus()) continue;
+            int pos = parent.getChildAdapterPosition(child);
+            if (pos < 0) return;
+            int color = adapter.ambientColorAt(pos);
+            int rgb = color & 0x00FFFFFF;
+            if (radiosityShader == null || radiosityColor != rgb) {
+                radiosityColor = rgb;
+                int coreAlpha = nightMode ? 0x68000000 : 0x44000000;
+                int midAlpha = nightMode ? 0x24000000 : 0x18000000;
+                radiosityShader = new RadialGradient(0f, 0f, 1f,
+                        new int[]{coreAlpha | rgb, midAlpha | rgb, 0x00000000},
+                        new float[]{0f, 0.55f, 1f}, Shader.TileMode.CLAMP);
+                radiosityPaint.setShader(radiosityShader);
+            }
+            float cx = child.getLeft() + card.getLeft() + card.getWidth() * 0.5f
+                    + card.getTranslationX() + child.getTranslationX();
+            float cy = child.getTop() + card.getTop() + card.getHeight() * 0.5f
+                    + card.getTranslationY() + child.getTranslationY() + 8f * density;
+            float rx = card.getWidth() * card.getScaleX() * 0.85f;
+            float ry = card.getHeight() * card.getScaleY() * 0.98f;
+            radiosityMatrix.reset();
+            radiosityMatrix.setScale(rx, ry);
+            radiosityMatrix.postTranslate(cx, cy);
+            radiosityShader.setLocalMatrix(radiosityMatrix);
+            c.drawOval(cx - rx, cy - ry, cx + rx, cy + ry, radiosityPaint);
+            return;
+        }
     }
 }
